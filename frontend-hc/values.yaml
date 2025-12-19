@@ -5,10 +5,10 @@
 replicaCount: 1
 
 image:
-  repository: 10.131.103.92:8090/kp_4/frontend
+  repository: 10.131.103.92:8090/kp_9/frontendpod
   pullPolicy: Always
   # Overrides the image tag whose default is the chart appVersion.
-  tag: "87"
+  tag: "latest"
 
 imagePullSecrets:
   - name: regcred
