@@ -2,16 +2,7 @@ pipeline {
     agent any
 
     parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
-            description: 'Pipeline execution type'
-        )
-        choice(
-            name: 'ENV',
-            choices: ['dev', 'qa', 'prod'],
-            description: 'Target environment / namespace'
-        )
+        choice(name: 'ENV', choices: ['dev', 'qa', 'prod'], description: 'Target namespace')
     }
 
     environment {
@@ -23,14 +14,12 @@ pipeline {
     stages {
 
         stage('Checkout') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
             steps {
-                git branch: 'master', url: 'https://github.com/ThanujaRatakonda/kp_9'
+                git branch: 'master', url: 'https://github.com/ThanujaRatakonda/kp_9.git'
             }
         }
 
         stage('Calculate Release Version') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
             steps {
                 script {
                     def lastTag = sh(
@@ -51,7 +40,6 @@ pipeline {
         }
 
         stage('Build & Push Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
             steps {
                 withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'H_USER', passwordVariable: 'H_PASS')]) {
                     sh """
@@ -64,7 +52,6 @@ pipeline {
         }
 
         stage('Build & Push Frontend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
             steps {
                 withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'H_USER', passwordVariable: 'H_PASS')]) {
                     sh """
@@ -77,7 +64,6 @@ pipeline {
         }
 
         stage('Update Helm Values') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
             steps {
                 sh """
                     sed -i 's/tag:.*/tag: "${RELEASE}"/' backend-hc/backendvalues.yaml
@@ -86,13 +72,11 @@ pipeline {
             }
         }
 
-        stage('Apply Infra & ArgoCD') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
+        stage('Apply k8s & ArgoCD') {
             steps {
                 sh """
                     export ENV=${ENV}
-
-                    # Apply k8s infra (Namespace, PV, PVC, StorageClass)
+                    # Apply k8s resources
                     for f in k8s/*.yaml; do
                         envsubst < \$f | kubectl apply -f -
                     done
@@ -106,14 +90,15 @@ pipeline {
         }
 
         stage('Create Git Tag') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
             steps {
-                sh """
-                    git tag ${RELEASE}
-                    git push origin ${RELEASE}
-                    git push https://${GIT_USER}:${GIT_PASS}@github.com/ThanujaRatakonda/kp_9.git ${RELEASE}
-                """
+                withCredentials([usernamePassword(credentialsId: 'github-creds', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_PASS')]) {
+                    sh """
+                        git tag ${RELEASE}
+                        git push https://${GIT_USER}:${GIT_PASS}@github.com/ThanujaRatakonda/kp_9.git ${RELEASE}
+                    """
+                }
             }
         }
     }
 }
+
