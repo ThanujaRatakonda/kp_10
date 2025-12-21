@@ -5,113 +5,114 @@ pipeline {
         choice(
             name: 'ENV',
             choices: ['dev', 'qa', 'prod'],
-            description: 'Select target environment'
+            description: 'Target environment'
         )
     }
 
     environment {
-        REPO_URL       = 'https://github.com/ThanujaRatakonda/kp_9'
-        IMAGE_TAG      = "${BUILD_NUMBER}"
-        HARBOR_URL     = "10.131.103.92:8090"
-        HARBOR_PROJECT = "kp_9"
+        REGISTRY = "10.131.103.92:8090"
+        PROJECT  = "kp_9"
+        IMAGE_TAG = "${BUILD_NUMBER}"
     }
 
     stages {
 
         stage('Checkout Code') {
             steps {
-                git branch: 'master', url: "${REPO_URL}"
+                checkout scm
             }
         }
 
-        // ---------------- BUILD IMAGES ----------------
-        stage('Build Images') {
+        stage('Build Docker Images') {
             steps {
                 sh '''
-                docker build -t frontend:${IMAGE_TAG} backend/
-                docker build -t backend:${IMAGE_TAG} frontend/
+                docker build -t $REGISTRY/$PROJECT/backend:$IMAGE_TAG backend
+                docker build -t $REGISTRY/$PROJECT/frontend:$IMAGE_TAG frontend
+                docker build -t $REGISTRY/$PROJECT/database:$IMAGE_TAG database
                 '''
             }
         }
 
-        // ---------------- PUSH TO HARBOR ----------------
-        stage('Push Images to Harbor') {
+        stage('Login to Harbor') {
             steps {
-                script {
-                    withCredentials([
-                        usernamePassword(
-                            credentialsId: 'harbor-creds',
-                            usernameVariable: 'HARBOR_USER',
-                            passwordVariable: 'HARBOR_PASS'
-                        )
-                    ]) {
-                        sh '''
-                        echo $HARBOR_PASS | docker login ${HARBOR_URL} \
-                          -u $HARBOR_USER --password-stdin
-
-                        docker tag frontend:${IMAGE_TAG} ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                        docker tag backend:${IMAGE_TAG}  ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
-
-                        docker push ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                        docker push ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
-                        '''
-                    }
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'harbor-creds',
+                        usernameVariable: 'HARBOR_USER',
+                        passwordVariable: 'HARBOR_PASS'
+                    )
+                ]) {
+                    sh '''
+                    echo "$HARBOR_PASS" | docker login $REGISTRY -u "$HARBOR_USER" --password-stdin
+                    '''
                 }
             }
         }
 
-        // ---------------- UPDATE HELM VALUES ----------------
+        stage('Push Docker Images') {
+            steps {
+                sh '''
+                docker push $REGISTRY/$PROJECT/backend:$IMAGE_TAG
+                docker push $REGISTRY/$PROJECT/frontend:$IMAGE_TAG
+                docker push $REGISTRY/$PROJECT/database:$IMAGE_TAG
+                '''
+            }
+        }
+
         stage('Update Helm Image Tags') {
             steps {
                 sh '''
-                sed -i "s/tag:.*/tag: ${IMAGE_TAG}/" backend-hc/values.yaml
-                sed -i "s/tag:.*/tag: ${IMAGE_TAG}/" frontend-hc/values.yaml
+                echo "Updating Helm values to tag $IMAGE_TAG"
+
+                sed -i "s|tag:.*|tag: \\"$IMAGE_TAG\\"|" backend-hc/backendvalues.yaml
+                sed -i "s|tag:.*|tag: \\"$IMAGE_TAG\\"|" frontend-hc/frontendvalues.yaml
+                sed -i "s|tag:.*|tag: \\"$IMAGE_TAG\\"|" database-hc/databasevalues.yaml
+
+                echo "Backend:"
+                grep tag backend-hc/backendvalues.yaml
+                echo "Frontend:"
+                grep tag frontend-hc/frontendvalues.yaml
+                echo "Database:"
+                grep tag database-hc/databasevalues.yaml
                 '''
             }
         }
 
-        // ---------------- PREPARE ARGOCD MANIFESTS ----------------
-        stage('Prepare Manifests') {
+        stage('Commit Helm Changes') {
             steps {
-                sh '''
-                mkdir -p rendered/argocd rendered/k8s
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'git-creds',
+                        usernameVariable: 'GIT_USER',
+                        passwordVariable: 'GIT_PASS'
+                    )
+                ]) {
+                    sh '''
+                    git config user.email "ratakondathanuja@gmail.com"
+                    git config user.name "thanuja"
 
-                for f in argocd/*.yaml; do
-                  envsubst < $f > rendered/argocd/$(basename $f)
-                done
+                    git add .
+                    git commit -m "Update image tags to $IMAGE_TAG for $ENV" || true
 
-                for f in k8s/*.yaml; do
-                  envsubst < $f > rendered/k8s/$(basename $f)
-                done
-                '''
+                    git push https://$GIT_USER:$GIT_PASS@github.com/ThanujaRatakonda/kp_9.git master
+                    '''
+                }
             }
         }
 
-        // ---------------- DEPLOY INFRA ----------------
-        stage('Deploy Infra') {
+        stage('Trigger ArgoCD Sync') {
             steps {
-                sh '''
-                kubectl apply -f rendered/k8s/
-                '''
-            }
-        }
-
-        // ---------------- DEPLOY APPS (ARGOCD) ----------------
-        stage('Deploy Applications via ArgoCD') {
-            steps {
-                sh '''
-                kubectl apply -f rendered/argocd/
-                '''
+                echo "ArgoCD will auto-sync from Git (GitOps)"
             }
         }
     }
 
     post {
         success {
-            echo "Deployment to ${params.ENV} completed successfully 🚀"
+            echo "Deployment to $ENV completed successfully "
         }
         failure {
-            echo "Deployment to ${params.ENV} failed ❌"
+            echo "Deployment to $ENV failed "
         }
     }
 }
