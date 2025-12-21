@@ -133,15 +133,16 @@ pipeline {
     }
 
     post {
-        always {
-            echo "Cleaning up Docker images..."
-            sh "docker rmi frontend:${IMAGE_TAG} backend:${IMAGE_TAG} || true"
-        }
-        success {
-            echo "Pipeline completed successfully!"
-        }
-        failure {
-            echo "Pipeline failed. Check Trivy scan or deployment logs."
-        }
+    always {
+        echo "Cleaning up Docker images..."
+        sh "docker rmi frontend:${env.IMAGE_TAG} backend:${env.IMAGE_TAG} || true"
     }
+    success {
+        echo "Pipeline completed successfully!"
+    }
+    failure {
+        echo "Pipeline failed. Check Trivy scan or deployment logs."
+    }
+}
+
 }
