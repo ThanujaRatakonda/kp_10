@@ -87,17 +87,19 @@ pipeline {
             }
         }
 
-        stage('Commit & Push to Git') {
-            steps {
-                sh """
-                git config user.name "thanuja"
-                git config user.email "ratakondathanuja@gmail.com"
-                git add .
-                git commit -m "Update image tag to ${IMAGE_TAG}" || echo "No changes to commit"
-                git push origin master
-                """
-            }
+stage('Commit & Push to Git') {
+    steps {
+        withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+            sh """
+            git config user.name "thanuja"
+            git config user.email "ratakondathanuja@gmail.com"
+            git add .
+            git commit -m "Update image tag to ${IMAGE_TAG}" || echo "No changes to commit"
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
+            """
         }
     }
+}
+
 }
 
