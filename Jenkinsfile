@@ -18,8 +18,8 @@ pipeline {
     )
     choice(
       name: 'ENV',
-      choices: ['qa', 'pro'],  // Only qa and pro environments
-      description: 'Choose the environment to deploy (qa/pro)'
+      choices: ['dev'],  // Only dev environment now
+      description: 'Choose the environment to deploy (dev)'
     )
   }
 
@@ -146,7 +146,7 @@ pipeline {
           passwordVariable: 'GIT_TOKEN'
         )]) {
           sh """
-            git config user.name "thanuja"
+            git config user.name "Thanuja"
             git config user.email "ratakondathanuja@gmail.com"
             git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
             git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
@@ -163,7 +163,7 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-          // Check if ArgoCD resources already exist, if not apply them
+          // Apply ArgoCD resources if they are not already applied
           sh """
             kubectl get application backend -n argocd || kubectl apply -f argocd/backend_${params.ENV}.yaml
             kubectl get application database -n argocd || kubectl apply -f argocd/database-${params.ENV}.yaml
@@ -173,7 +173,8 @@ pipeline {
           // Apply Kubernetes resources (PVC, PV, etc.)
           sh """
             kubectl get pvc shared-pvc -n ${params.ENV} || kubectl apply -f k8s/shared-pvc_${params.ENV}.yaml -n ${params.ENV}
-            kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv.yaml
+            kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv_${params.ENV}.yaml
+            kubectl apply -f k8s/shared-storage-class.yaml
           """
         }
       }
