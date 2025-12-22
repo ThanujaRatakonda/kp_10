@@ -15,7 +15,7 @@ spec:
     path: frontend-hc
     helm:
       valueFiles:
-        - frontendvalues_pro.yaml
+        - frontendvalues_dev.yaml
 
   destination:
     server: https://kubernetes.default.svc
