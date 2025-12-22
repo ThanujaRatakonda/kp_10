@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: database
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: CreateNamespace=true
+
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/ThanujaRatakonda/kp_10
+    targetRevision: master
+    path: database-hc
+    helm:
+      valueFiles:
+        - databasevalues_dev.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: dev
+
+  syncPolicy:
+    automated:
+      prune: false
+      selfHeal: true
