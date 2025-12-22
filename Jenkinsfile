@@ -3,28 +3,29 @@ pipeline {
 
   environment {
     REGISTRY = "10.131.103.92:8090"
-    PROJECT  = "kp_10"
+    PROJECT  = "kp_9"
     IMAGE_TAG = "${BUILD_NUMBER}"
-    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_10.git"
+    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_9.git"
     DOCKER_USERNAME = "admin"
     DOCKER_PASSWORD = "Harbor12345"
+    TRIVY_OUTPUT_JSON = "trivy-output.json"
   }
 
   parameters {
     choice(
       name: 'ACTION',
-      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY'],
-      description: 'Run full pipeline, only frontend/backend/database, or just apply ArgoCD resources'
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'ARGOCD_ONLY'],
+      description: 'Run full pipeline, only frontend/backend, or just apply ArgoCD resources'
     )
     choice(
       name: 'ENV',
-      choices: ['dev', 'qa'],
-      description: 'Choose the environment to deploy (dev/qa)'
+      choices: ['dev', 'qa', 'BOTH'],  // 🔥 NEW: Deploy BOTH at once!
+      description: 'Choose environment(s): dev/qa/BOTH'
     )
     booleanParam(
-      name: 'RESET_STORAGE',
+      name: 'SKIP_SCANNING',
       defaultValue: false,
-      description: 'If true, delete PV/PVC for this ENV before re-applying (⚠️ DESTRUCTIVE)'
+      description: 'Skip Trivy vulnerability scanning (for quick testing)'
     )
   }
 
@@ -35,198 +36,248 @@ pipeline {
       }
     }
 
-    stage('Create Namespace') {
+    /* =========================
+       SETUP ENVIRONMENTS (dev/qa/BOTH)
+       ========================= */
+    stage('Setup Environments') {
       steps {
         script {
-          def ENV_NS = params.ENV
-          sh """
-            kubectl get namespace ${ENV_NS} >/dev/null 2>&1 || kubectl create namespace ${ENV_NS}
-            echo "✅ Namespace ${ENV_NS} ready"
-          """
-        }
-      }
-    }
-
-    stage('Reset Storage (optional)') {
-      when { expression { params.RESET_STORAGE } }
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          def PV_NAME = "shared-pv-${ENV_NS}"
-          sh """
-            set -e
-            echo "🔄 RESET_STORAGE: Cleaning ${ENV_NS}..."
-            kubectl scale deploy backend-backend-hc -n ${ENV_NS} --replicas=0 || true
-            kubectl scale deploy frontend-frontend-hc -n ${ENV_NS} --replicas=0 || true
-            kubectl scale sts database-database-hc -n ${ENV_NS} --replicas=0 || true
-            
-            kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{\"metadata\":{\"finalizers\":[]}}' || true
-            kubectl delete pvc shared-pvc -n ${ENV_NS} --force --grace-period=0 || true
-            kubectl patch pv ${PV_NAME} -p '{\"metadata\":{\"finalizers\":[]}}' || true
-            kubectl delete pv ${PV_NAME} --force --grace-period=0 || true
-          """
-        }
-      }
-    }
-
-    stage('Apply Storage (PV/PVC)') {
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
-          def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
-          
-          sh """
-            set -e
-            echo "💾 Applying storage for ${ENV_NS}..."
-            
-            kubectl apply -f k8s/shared-storage-class.yaml || true
-            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
-            kubectl get pv shared-pv-${ENV_NS}
-            
-            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
-            
-            for i in {1..30}; do
-              PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-              [ "\$PHASE" = "Bound" ] && echo "✅ PVC Bound!" && break
-              echo "⏳ PVC: \$PHASE (\$i/30)"
-              sleep 5
-            done
-          """
-        }
-      }
-    }
-
-    stage('Docker Registry Secret') {
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          sh """
-            kubectl get secret regcred -n ${ENV_NS} >/dev/null 2>&1 || \\
-            kubectl create secret docker-registry regcred -n ${ENV_NS} \\
-              --docker-server=${REGISTRY} \\
-              --docker-username=${DOCKER_USERNAME} \\
-              --docker-password=${DOCKER_PASSWORD}
-            echo "✅ Registry secret ready"
-          """
-        }
-      }
-    }
-
-    stage('🚀 Deploy Database FIRST') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          sh """
-            set -e
-            echo "🐳 Deploying Database to ${ENV_NS}..."
-            
-            helm upgrade --install database-database-hc ./database-hc \\
-              --namespace ${ENV_NS} \\
-              --values database-hc/databasevalues_${ENV_NS}.yaml
-            
-            kubectl rollout status sts/database-database-hc -n ${ENV_NS} --timeout=300s
-            
-            echo "✅ Database ready!"
-            kubectl get sts,svc,pvc -n ${ENV_NS} | grep database
-          """
-        }
-      }
-    }
-
-    stage('Build & Push Frontend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
-      steps {
-        script {
-          sh """
-            set -e
-            docker build -t frontend:${IMAGE_TAG} ./frontend
-            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
-            docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-            docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-            echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
-          """
-        }
-      }
-    }
-
-    stage('Build & Push Backend') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
-      steps {
-        script {
-          sh """
-            set -e
-            docker build -t backend:${IMAGE_TAG} ./backend
-            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
-            docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-            docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-            echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
-          """
-        }
-      }
-    }
-
-    stage('Update & Commit Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          sh """
-            set -e
-            echo "✏️ Updating Helm values..."
-            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${ENV_NS}.yaml
-            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${ENV_NS}.yaml
-            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${ENV_NS}.yaml
-            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${ENV_NS}.yaml
-          """
-          
-          withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
             sh """
-              git config user.name "Thanuja"
-              git config user.email "ratakondathanuja@gmail.com"
-              git add frontend-hc/frontendvalues_${ENV_NS}.yaml backend-hc/backendvalues_${ENV_NS}.yaml
-              git commit -m "chore: images ${IMAGE_TAG} for ${ENV_NS}" || echo "No changes"
-              git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+              # Create namespace if needed
+              kubectl get namespace ${ENV_NS} || kubectl create namespace ${ENV_NS}
+              
+              # Create Docker Registry Secret
+              kubectl get secret regcred -n ${ENV_NS} || kubectl create secret docker-registry regcred -n ${ENV_NS} \
+                --docker-server=${REGISTRY} \
+                --docker-username=${DOCKER_USERNAME} \
+                --docker-password=${DOCKER_PASSWORD}
+              
+              # Apply storage (PV/PVC)
+              kubectl get pvc shared-pvc -n ${ENV_NS} || kubectl apply -f k8s/shared-pvc_${ENV_NS}.yaml -n ${ENV_NS}
+              kubectl get pv shared-pv-${ENV_NS} || kubectl apply -f k8s/shared-pv_${ENV_NS}.yaml
+              
+              echo "✅ ${ENV_NS} environment ready!"
             """
           }
         }
       }
     }
 
-    stage('🔄 Apply ArgoCD Apps') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
+    /* =========================
+       FRONTEND: Build → Trivy → Push
+       ========================= */
+    stage('Build Frontend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
+        sh """
+          docker build -t frontend:${IMAGE_TAG} ./frontend
+          echo "✅ Frontend built: frontend:${IMAGE_TAG}"
+        """
+      }
+    }
+
+    stage('🛡️ Trivy Scan Frontend') {
+      when { 
+        expression { 
+          params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] && 
+          !params.SKIP_SCANNING
+        } 
+      }
+      steps {
+        sh """
+          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} frontend:${IMAGE_TAG}
+        """
+        archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true, allowEmptyArchive: true
+        
         script {
-          def ENV_NS = params.ENV
+          def props = readJSON file: "${TRIVY_OUTPUT_JSON}"
+          def criticalHighCount = 0
+          
+          props.Results.each { result ->
+            if (result.Vulnerabilities) {
+              criticalHighCount += result.Vulnerabilities.count { 
+                it.Severity in ['CRITICAL', 'HIGH'] 
+              }
+            }
+          }
+          
+          echo "🔍 Frontend: ${criticalHighCount} CRITICAL/HIGH vulnerabilities"
+          if (criticalHighCount > 0) {
+            error "🚨 ${criticalHighCount} CRITICAL/HIGH vulnerabilities in frontend!"
+          }
+          echo "✅ Frontend scan PASSED!"
+        }
+      }
+    }
+
+    stage('Push Frontend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'harbor-creds',
+          usernameVariable: 'USER',
+          passwordVariable: 'PASS'
+        )]) {
           sh """
-            set -e
-            echo "🎯 Applying ArgoCD for ${ENV_NS}..."
-            
-            kubectl apply -f argocd/backend_${ENV_NS}.yaml
-            kubectl apply -f argocd/frontend_${ENV_NS}.yaml
-            kubectl apply -f argocd/database-app_${ENV_NS}.yaml
-            
-            kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-            
-            kubectl get applications -n argocd
+            docker login ${REGISTRY} -u \$USER -p \$PASS
+            docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+            docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+            docker rmi frontend:${IMAGE_TAG} || true
+            echo "✅ Frontend pushed!"
           """
         }
       }
     }
 
-    stage('✅ Verify All Healthy') {
+    /* =========================
+       BACKEND: Build → Trivy → Push
+       ========================= */
+    stage('Build Backend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
+      steps {
+        sh """
+          docker build -t backend:${IMAGE_TAG} ./backend
+          echo "✅ Backend built: backend:${IMAGE_TAG}"
+        """
+      }
+    }
+
+    stage('🛡️ Trivy Scan Backend') {
+      when { 
+        expression { 
+          params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] && 
+          !params.SKIP_SCANNING
+        } 
+      }
+      steps {
+        sh """
+          trivy image --severity CRITICAL,HIGH --format json -o ${TRIVY_OUTPUT_JSON} backend:${IMAGE_TAG}
+        """
+        archiveArtifacts artifacts: "${TRIVY_OUTPUT_JSON}", fingerprint: true, allowEmptyArchive: true
+        
+        script {
+          def props = readJSON file: "${TRIVY_OUTPUT_JSON}"
+          def criticalHighCount = 0
+          
+          props.Results.each { result ->
+            if (result.Vulnerabilities) {
+              criticalHighCount += result.Vulnerabilities.count { 
+                it.Severity in ['CRITICAL', 'HIGH'] 
+              }
+            }
+          }
+          
+          echo "🔍 Backend: ${criticalHighCount} CRITICAL/HIGH vulnerabilities"
+          if (criticalHighCount > 0) {
+            error "🚨 ${criticalHighCount} CRITICAL/HIGH vulnerabilities in backend!"
+          }
+          echo "✅ Backend scan PASSED!"
+        }
+      }
+    }
+
+    stage('Push Backend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'harbor-creds',
+          usernameVariable: 'USER',
+          passwordVariable: 'PASS'
+        )]) {
+          sh """
+            docker login ${REGISTRY} -u \$USER -p \$PASS
+            docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+            docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+            docker rmi backend:${IMAGE_TAG} || true
+            echo "✅ Backend pushed!"
+          """
+        }
+      }
+    }
+
+    /* =========================
+       UPDATE HELM VALUES FOR ALL ENVS
+       ========================= */
+    stage('Update Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
         script {
-          def ENV_NS = params.ENV
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
+            sh """
+              sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' frontend-hc/frontendvalues_${ENV_NS}.yaml
+              sed -i 's|tag:.*|tag: "${IMAGE_TAG}"|' backend-hc/backendvalues_${ENV_NS}.yaml
+              echo "✅ Updated ${ENV_NS} helm values to tag ${IMAGE_TAG}"
+            """
+          }
+        }
+      }
+    }
+
+    /* =========================
+       COMMIT FOR ARGO CD (ALL ENVS)
+       ========================= */
+    stage('Commit & Push Helm Changes') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'GitHub',
+          usernameVariable: 'GIT_USER',
+          passwordVariable: 'GIT_TOKEN'
+        )]) {
           sh """
-            echo "=== FINAL STATUS ==="
-            kubectl get pods -n ${ENV_NS}
-            kubectl get applications -n argocd
-            kubectl get svc -n ${ENV_NS}
+            git config user.name "thanuja"
+            git config user.email "ratakondathanuja@gmail.com"
+            git add frontend-hc/*.yaml backend-hc/*.yaml
+            git commit -m "chore: update images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+            git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
+            echo "✅ Committed changes for ${params.ENV}"
           """
+        }
+      }
+    }
+
+    /* =========================
+       APPLY ARGOCD APPS (dev/qa/BOTH)
+       ========================= */
+    stage('Apply ArgoCD Apps') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
+      steps {
+        script {
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
+            sh """
+              # Apply ArgoCD apps for this env
+              kubectl get application backend-${ENV_NS} -n argocd || kubectl apply -f argocd/backend-app_${ENV_NS}.yaml
+              kubectl get application frontend-${ENV_NS} -n argocd || kubectl apply -f argocd/frontend-app_${ENV_NS}.yaml
+              kubectl get application database-${ENV_NS} -n argocd || kubectl apply -f argocd/database-app_${ENV_NS}.yaml
+              
+              # Hard refresh ArgoCD
+              kubectl annotate application backend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application frontend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application database-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              
+              echo "✅ ArgoCD apps applied for ${ENV_NS}"
+            """
+          }
+        }
+      }
+    }
+
+    stage('✅ Verify Deployment') {
+      steps {
+        script {
+          def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
+          for (def ENV_NS : envs) {
+            sh """
+              echo "=== ${ENV_NS} STATUS ==="
+              kubectl get pods -n ${ENV_NS}
+              kubectl get svc -n ${ENV_NS}
+            """
+          }
+          sh "kubectl get applications -n argocd | grep -E '(dev|qa)'"
         }
       }
     }
@@ -236,6 +287,7 @@ pipeline {
     always {
       sh 'docker logout ${REGISTRY} || true'
       sh 'docker image prune -f || true'
+      archiveArtifacts artifacts: 'trivy-output.json', allowEmptyArchive: true
     }
   }
 }
