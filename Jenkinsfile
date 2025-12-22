@@ -13,8 +13,8 @@ pipeline {
   parameters {
     choice(
       name: 'ACTION',
-      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'ARGOCD_ONLY'],
-      description: 'Run full pipeline, only frontend/backend, or just apply ArgoCD resources'
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'DATABASE_ONLY', 'ARGOCD_ONLY'],
+      description: 'Run full pipeline, only frontend/backend/database, or just apply ArgoCD resources'
     )
     choice(
       name: 'ENV',
@@ -58,11 +58,12 @@ pipeline {
             set -e
             echo "RESET_STORAGE=true: cleaning PV/PVC for ENV=${ENV_NS}"
 
-            # Scale down apps
+            # Scale down ALL apps including database
             kubectl scale deploy backend-backend-hc -n ${ENV_NS} --replicas=0 || true
+            kubectl scale deploy frontend-frontend-hc -n ${ENV_NS} --replicas=0 || true
             kubectl scale sts database-database-hc -n ${ENV_NS} --replicas=0 || true
 
-            # Remove PVC finalizers (FIXED JSON ESCAPING)
+            # Remove PVC finalizers
             kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{\"metadata\":{\"finalizers\":[]}}' || true
             kubectl delete pvc shared-pvc -n ${ENV_NS} --force --grace-period=0 || true
 
@@ -126,6 +127,34 @@ pipeline {
               --docker-username=${DOCKER_USERNAME} \\
               --docker-password=${DOCKER_PASSWORD}
             kubectl get secret regcred -n ${ENV_NS}
+          """
+        }
+      }
+    }
+
+    // DATABASE DEPLOYMENT - NEW STAGE
+    stage('Deploy Database') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
+      steps {
+        script {
+          def ENV_NS = params.ENV
+          sh """
+            set -e
+            echo "Deploying Database to ${ENV_NS} namespace..."
+            
+            # Deploy database StatefulSet/Service using Helm or raw manifests
+            # Option 1: If you have database manifests
+            kubectl apply -f k8s/database_${ENV_NS}.yaml || true
+            
+            # Option 2: If using Helm (uncomment below)
+            # helm upgrade --install database-database-hc ./database-hc \\
+            #   -n ${ENV_NS} -f database-hc/databasevalues_${ENV_NS}.yaml
+            
+            # Wait for database to be ready
+            kubectl rollout status sts/database-database-hc -n ${ENV_NS} --timeout=300s
+            
+            echo "Database deployed successfully in ${ENV_NS}"
+            kubectl get sts,pvc,svc -n ${ENV_NS} -l app=database
           """
         }
       }
@@ -196,16 +225,18 @@ pipeline {
     }
 
     stage('Apply ArgoCD Resources') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
         script {
           def ENV_NS = params.ENV
           sh """
+            set -e
+            # Apply ALL ArgoCD apps for this environment (includes database)
             kubectl apply -f argocd/backend_${ENV_NS}.yaml
             kubectl apply -f argocd/frontend_${ENV_NS}.yaml
-            kubectl apply -f argocd/database-app.yaml
-
-            # Force ArgoCD refresh
+            kubectl apply -f argocd/database_${ENV_NS}.yaml  # NEW: Environment-specific database
+            
+            # Force ArgoCD refresh for ALL apps
             kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
@@ -214,13 +245,6 @@ pipeline {
           """
         }
       }
-    }
-  }
-
-  post {
-    always {
-      sh 'docker logout ${REGISTRY} || true'
-      sh 'docker image prune -f || true'
     }
   }
 }
