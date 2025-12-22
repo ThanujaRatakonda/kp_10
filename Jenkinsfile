@@ -130,7 +130,7 @@ pipeline {
     /* =========================
        APPLY K8S AND ARGOCD RESOURCES TOGETHER
        ========================= */
-    stage('Apply Kubernetes & ArgoCD Resources') {
+stage('Apply Kubernetes & ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
@@ -140,8 +140,8 @@ pipeline {
           sh """
             export ENV=${params.ENV}
 
-            # Substituting ENV directly in shared-pvc.yaml and applying it with the correct namespace
-            envsubst < k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
+            # Replace ${ENV} in shared-pvc.yaml directly and apply
+            sed 's/\${ENV}/${ENV}/g' k8s/shared-pvc.yaml > k8s/shared-pvc_tmp.yaml
             kubectl apply -f k8s/shared-pvc_tmp.yaml --namespace=${params.ENV}
 
             # Apply PV (no namespace needed for PV)
@@ -164,12 +164,4 @@ pipeline {
         }
       }
     }
-
-  }
-
-  post {
-    success {
-      echo "Argo CD will deploy automatically."
-    }
-  }
 }
