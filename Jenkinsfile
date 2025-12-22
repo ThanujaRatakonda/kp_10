@@ -131,21 +131,17 @@ pipeline {
        APPLY K8S AND ARGOCD RESOURCES TOGETHER
        ========================= */
 stage('Apply Kubernetes & ArgoCD Resources') {
-  when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
-  steps {
-    script {
-      // Apply Kubernetes resources to the selected namespace (qa, dev, etc.)
-      sh """
-        kubectl apply -f k8s/ -n ${params.ENV}
-      """
-      
-      // Apply ArgoCD resources to the selected namespace dynamically
-      sh """
-        kubectl apply -f argocd/ -n ${params.ENV}
-      """
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
+      steps {
+        script {
+          sh """
+            kubectl apply -f k8s/ -n dev 
+          """
+          sh """
+            kubectl apply -f argocd/ 
+          """
+        }
+      }
     }
-  }
-}
-
 }
 }
