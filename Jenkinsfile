@@ -18,13 +18,13 @@ pipeline {
     )
     choice(
       name: 'ENV',
-      choices: ['dev', 'qa', 'BOTH'],  // 🔥 ADDED BOTH!
+      choices: ['dev', 'qa', 'BOTH'],
       description: 'Choose environment(s) to deploy (dev/qa/BOTH)'
     )
     booleanParam(
       name: 'RESET_STORAGE',
       defaultValue: false,
-      description: 'If true, delete PV/PVC for this ENV before re-applying (⚠️ DESTRUCTIVE)'
+      description: 'If true, delete PV/PVC for this ENV before re-applying ( DESTRUCTIVE)'
     )
   }
 
@@ -42,7 +42,7 @@ pipeline {
           for (def ENV_NS : envs) {
             sh """
               kubectl get namespace ${ENV_NS} >/dev/null 2>&1 || kubectl create namespace ${ENV_NS}
-              echo "✅ Namespace ${ENV_NS} ready"
+              echo " Namespace ${ENV_NS} ready"
             """
           }
         }
@@ -58,7 +58,7 @@ pipeline {
             def PV_NAME = "shared-pv-${ENV_NS}"
             sh """
               set -e
-              echo "🔄 RESET_STORAGE: Cleaning ${ENV_NS}..."
+              echo " RESET_STORAGE: Cleaning ${ENV_NS}..."
               kubectl scale deploy backend-backend-hc -n ${ENV_NS} --replicas=0 || true
               kubectl scale deploy frontend-frontend-hc -n ${ENV_NS} --replicas=0 || true
               kubectl scale sts database-database-hc -n ${ENV_NS} --replicas=0 || true
@@ -83,7 +83,7 @@ pipeline {
             
             sh """
               set -e
-              echo "💾 Applying storage for ${ENV_NS}..."
+              echo "Applying storage for ${ENV_NS}..."
               
               kubectl apply -f k8s/shared-storage-class.yaml || true
               test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
@@ -93,8 +93,8 @@ pipeline {
               
               for i in {1..30}; do
                 PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-                [ "\$PHASE" = "Bound" ] && echo "✅ PVC ${ENV_NS} Bound!" && break
-                echo "⏳ PVC ${ENV_NS}: \$PHASE (\$i/30)"
+                [ "\$PHASE" = "Bound" ] && echo "PVC ${ENV_NS} Bound!" && break
+                echo " PVC ${ENV_NS}: \$PHASE (\$i/30)"
                 sleep 5
               done
             """
@@ -114,14 +114,14 @@ pipeline {
                 --docker-server=${REGISTRY} \\
                 --docker-username=${DOCKER_USERNAME} \\
                 --docker-password=${DOCKER_PASSWORD}
-              echo "✅ Registry secret ${ENV_NS} ready"
+              echo " Registry secret ${ENV_NS} ready"
             """
           }
         }
       }
     }
 
-    stage('🚀 Deploy Database FIRST') {
+    stage(' Deploy Database FIRST') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
       steps {
         script {
@@ -129,7 +129,7 @@ pipeline {
           for (def ENV_NS : envs) {
             sh """
               set -e
-              echo "🐳 Deploying Database to ${ENV_NS}..."
+              echo " Deploying Database to ${ENV_NS}..."
               
               helm upgrade --install database-database-hc ./database-hc \\
                 --namespace ${ENV_NS} \\
@@ -137,7 +137,7 @@ pipeline {
               
               kubectl rollout status sts/database-database-hc -n ${ENV_NS} --timeout=300s
               
-              echo "✅ Database ${ENV_NS} ready!"
+              echo " Database ${ENV_NS} ready!"
               kubectl get sts,svc,pvc -n ${ENV_NS} | grep database
             """
           }
@@ -155,7 +155,7 @@ pipeline {
             echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
             docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-            echo "✅ Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+            echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
           """
         }
       }
@@ -171,7 +171,7 @@ pipeline {
             echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
             docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-            echo "✅ Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
+            echo " Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
           """
         }
       }
@@ -185,7 +185,6 @@ pipeline {
           for (def ENV_NS : envs) {
             sh """
               set -e
-              echo "✏️ Updating Helm values for ${ENV_NS}..."
               sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${ENV_NS}.yaml
               sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${ENV_NS}.yaml
               sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${ENV_NS}.yaml
@@ -206,7 +205,7 @@ pipeline {
       }
     }
 
-    stage('🔄 Apply ArgoCD Apps') {
+    stage(' Apply ArgoCD Apps') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY', 'DATABASE_ONLY'] } }
       steps {
         script {
@@ -214,15 +213,16 @@ pipeline {
           for (def ENV_NS : envs) {
             sh """
               set -e
-              echo "🎯 Applying ArgoCD for ${ENV_NS}..."
+
               
               kubectl apply -f argocd/backend_${ENV_NS}.yaml
               kubectl apply -f argocd/frontend_${ENV_NS}.yaml
               kubectl apply -f argocd/database-app_${ENV_NS}.yaml
               
-              kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-              kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+             
+              kubectl annotate application frontend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application backend-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+              kubectl annotate application database-${ENV_NS} -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
             """
           }
           sh "kubectl get applications -n argocd"
@@ -230,7 +230,7 @@ pipeline {
       }
     }
 
-    stage('✅ Verify All Healthy') {
+    stage('Verify All Healthy') {
       steps {
         script {
           def envs = params.ENV == 'BOTH' ? ['dev', 'qa'] : [params.ENV]
@@ -241,7 +241,10 @@ pipeline {
               kubectl get svc -n ${ENV_NS}
             """
           }
-          sh "kubectl get applications -n argocd"
+          sh """
+            echo "=== ARGOCD APPS ==="
+            kubectl get applications -n argocd | grep -E '(frontend|backend|database)-(dev|qa)'
+          """
         }
       }
     }
