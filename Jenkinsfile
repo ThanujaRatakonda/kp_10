@@ -16,6 +16,11 @@ pipeline {
       choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY', 'ARGOCD_ONLY'],
       description: 'Run full pipeline, only frontend/backend, or just apply ArgoCD resources'
     )
+    choice(
+      name: 'ENV',
+      choices: ['qa', 'pro'],  // Only qa and pro environments
+      description: 'Choose the environment to deploy (qa/pro)'
+    )
   }
 
   stages {
@@ -32,7 +37,7 @@ pipeline {
       steps {
         script {
           sh """
-            kubectl get secret regcred -n dev || kubectl create secret docker-registry regcred -n dev \
+            kubectl get secret regcred -n ${params.ENV} || kubectl create secret docker-registry regcred -n ${params.ENV} \
               --docker-server=${REGISTRY} \
               --docker-username=${DOCKER_USERNAME} \
               --docker-password=${DOCKER_PASSWORD} 
@@ -74,7 +79,7 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues.yaml
+          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${params.ENV}.yaml
         """
       }
     }
@@ -112,7 +117,7 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
-          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/backendvalues.yaml
+          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/backendvalues_${params.ENV}.yaml
         """
       }
     }
@@ -130,7 +135,7 @@ pipeline {
           sh """
             git config user.name "thanuja"
             git config user.email "ratakondathanuja@gmail.com"
-            git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
+            git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
             git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
             git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
           """
@@ -147,14 +152,14 @@ pipeline {
         script {
           // Check if ArgoCD resources already exist, if not apply them
           sh """
-            kubectl get application backend -n argocd || kubectl apply -f argocd/backend-app.yaml
-            kubectl get application database -n argocd || kubectl apply -f argocd/database-app.yaml
-            kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend-app.yaml
+            kubectl get application backend -n argocd || kubectl apply -f argocd/backend_${params.ENV}.yaml
+            kubectl get application database -n argocd || kubectl apply -f argocd/database-${params.ENV}.yaml
+            kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend_${params.ENV}.yaml
           """
           
           // Apply Kubernetes resources (PVC, PV, etc.)
           sh """
-            kubectl get pvc shared-pvc -n dev || kubectl apply -f k8s/shared-pvc.yaml -n dev
+            kubectl get pvc shared-pvc -n ${params.ENV} || kubectl apply -f k8s/shared-pvc_${params.ENV}.yaml -n ${params.ENV}
             kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv.yaml
           """
         }
