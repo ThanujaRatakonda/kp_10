@@ -1,145 +1,125 @@
 pipeline {
-    agent any
+  agent any
 
-    environment {
-        ENV = "dev"                               // 👈 added
-        IMAGE_TAG = "${env.BUILD_NUMBER}"
-        HARBOR_URL = "10.131.103.92:8090"
-        HARBOR_PROJECT = "kp_9"
-        TRIVY_OUTPUT_JSON = "trivy-output.json"
+  environment {
+    ENV = "dev"
+    REGISTRY = "10.131.103.92:8090"
+    PROJECT  = "kp_9"
+    IMAGE_TAG = "${BUILD_NUMBER}"
+    GIT_REPO = "https://github.com/ThanujaRatakonda/kp_9.git"
+  }
+
+  parameters {
+    choice(
+      name: 'ACTION',
+      choices: ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
+      description: 'Run full pipeline or only frontend/backend'
+    )
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
+      }
     }
 
-    parameters {
-        choice(
-            name: 'ACTION',
-            choices: ['FULL_PIPELINE', 'SCALE_ONLY', 'FRONTEND_ONLY', 'BACKEND_ONLY'],
-            description: 'Choose FULL_PIPELINE, SCALE_ONLY, FRONTEND_ONLY, or BACKEND_ONLY'
-        )
-        string(name: 'FRONTEND_REPLICA_COUNT', defaultValue: '1')
-        string(name: 'BACKEND_REPLICA_COUNT', defaultValue: '1')
-        string(name: 'DB_REPLICA_COUNT', defaultValue: '1')
+    /* =========================
+       FRONTEND
+       ========================= */
+    stage('Build Frontend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
+      steps {
+        sh """
+          docker build -t frontend:${IMAGE_TAG} ./frontend
+        """
+      }
     }
 
-    stages {
-
-        stage('Checkout') {
-            when { expression { params.ACTION != 'SCALE_ONLY' } }
-            steps {
-                git 'https://github.com/ThanujaRatakonda/kp_9.git'
-            }
+    stage('Push Frontend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'harbor-creds',
+          usernameVariable: 'USER',
+          passwordVariable: 'PASS'
+        )]) {
+          sh """
+            docker login ${REGISTRY} -u $USER -p $PASS
+            docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+            docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
+          """
         }
-
-        /* =========================
-           🔥 BOOTSTRAP (NEW STAGE)
-           ========================= */
-        stage('Bootstrap K8s & ArgoCD') {
-            when { expression { params.ACTION == 'FULL_PIPELINE' } }
-            steps {
-                sh """
-                  echo "Create namespace if not exists"
-                  kubectl get ns ${ENV} || kubectl create ns ${ENV}
-
-                  echo "Apply k8s infra (safe re-run)"
-                  kubectl apply -f k8s/ -n ${ENV} || true
-
-                  echo "Apply ArgoCD applications (safe re-run)"
-                  kubectl apply -f argocd/ -n argocd || true
-                """
-            }
-        }
-
-        /* =========================
-           FRONTEND (UNCHANGED)
-           ========================= */
-        stage('Build Frontend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
-            steps {
-                sh "docker build -t frontend:${IMAGE_TAG} ./frontend"
-            }
-        }
-
-        stage('Scan Frontend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
-            steps {
-                sh """
-                  trivy image frontend:${IMAGE_TAG} \
-                  --severity CRITICAL,HIGH \
-                  --ignore-unfixed \
-                  --scanners vuln \
-                  --format json \
-                  -o ${TRIVY_OUTPUT_JSON}
-                """
-            }
-        }
-
-        stage('Push Frontend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'harbor-creds',
-                    usernameVariable: 'HARBOR_USER',
-                    passwordVariable: 'HARBOR_PASS'
-                )]) {
-                    sh """
-                      docker login ${HARBOR_URL} -u $HARBOR_USER -p $HARBOR_PASS
-                      docker tag frontend:${IMAGE_TAG} ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                      docker push ${HARBOR_URL}/${HARBOR_PROJECT}/frontend:${IMAGE_TAG}
-                    """
-                }
-            }
-        }
-
-        /* =========================
-           BACKEND (UNCHANGED)
-           ========================= */
-        stage('Build Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
-            steps {
-                sh "docker build -t backend:${IMAGE_TAG} ./backend"
-            }
-        }
-
-        stage('Scan Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
-            steps {
-                sh """
-                  trivy image backend:${IMAGE_TAG} \
-                  --severity CRITICAL,HIGH \
-                  --ignore-unfixed \
-                  --scanners vuln \
-                  --format json \
-                  -o ${TRIVY_OUTPUT_JSON}
-                """
-            }
-        }
-
-        stage('Push Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
-            steps {
-                withCredentials([usernamePassword(
-                    credentialsId: 'harbor-creds',
-                    usernameVariable: 'HARBOR_USER',
-                    passwordVariable: 'HARBOR_PASS'
-                )]) {
-                    sh """
-                      docker login ${HARBOR_URL} -u $HARBOR_USER -p $HARBOR_PASS
-                      docker tag backend:${IMAGE_TAG} ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
-                      docker push ${HARBOR_URL}/${HARBOR_PROJECT}/backend:${IMAGE_TAG}
-                    """
-                }
-            }
-        }
-
-        /* =========================
-           SCALING / HPA (UNCHANGED)
-           ========================= */
-        stage('Scale Frontend & Backend') {
-            when { expression { params.ACTION in ['FULL_PIPELINE','SCALE_ONLY','FRONTEND_ONLY','BACKEND_ONLY'] } }
-            steps {
-                sh "kubectl scale deployment frontend --replicas=${params.FRONTEND_REPLICA_COUNT} || true"
-                sh "kubectl scale deployment backend --replicas=${params.BACKEND_REPLICA_COUNT} || true"
-            }
-        }
-
+      }
     }
+
+    stage('Update Frontend Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','FRONTEND_ONLY'] } }
+      steps {
+        sh """
+          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues.yaml
+        """
+      }
+    }
+
+    /* =========================
+       BACKEND
+       ========================= */
+    stage('Build Backend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
+      steps {
+        sh """
+          docker build -t backend:${IMAGE_TAG} ./backend
+        """
+      }
+    }
+
+    stage('Push Backend Image') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'harbor-creds',
+          usernameVariable: 'USER',
+          passwordVariable: 'PASS'
+        )]) {
+          sh """
+            docker login ${REGISTRY} -u $USER -p $PASS
+            docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+            docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
+          """
+        }
+      }
+    }
+
+    stage('Update Backend Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE','BACKEND_ONLY'] } }
+      steps {
+        sh """
+          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' backend-hc/backendvalues.yaml
+        """
+      }
+    }
+
+    /* =========================
+       COMMIT FOR ARGO CD
+       ========================= */
+    stage('Commit & Push Helm Changes') {
+      steps {
+        sh """
+          git config user.name "thanu"
+          git config user.email "thanuja@gmail.com"
+          git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
+          git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
+          git push origin master
+        """
+      }
+    }
+  }
+
+  post {
+    success {
+      echo " Argo CD will deploy automatically."
+    }
+  }
 }
