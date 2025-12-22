@@ -1,0 +1,27 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: backend
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-options: CreateNamespace=true
+
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/ThanujaRatakonda/kp_9
+    targetRevision: master
+    path: backend-hc
+    helm:
+      valueFiles:
+        - backendvalues.yaml
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: qa
+
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
