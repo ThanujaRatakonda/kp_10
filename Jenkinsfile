@@ -135,11 +135,11 @@ pipeline {
           passwordVariable: 'GIT_TOKEN'
         )]) {
           sh """
-            git config user.name "thanuja"
+            git config user.name "Thanuja"
             git config user.email "ratakondathanuja@gmail.com"
             git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
             git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
-            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
           """
         }
       }
