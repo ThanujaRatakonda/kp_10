@@ -104,31 +104,46 @@ pipeline {
     /* =========================
        COMMIT FOR ARGO CD
        ========================= */
-  stage('Commit & Push Helm Changes') {
-  steps {
-    withCredentials([usernamePassword(
-      credentialsId: 'GitHub',
-      usernameVariable: 'GIT_USER',
-      passwordVariable: 'GIT_TOKEN'
-    )]) {
-      sh """
-        git config user.name "thanuja"
-        git config user.email "ratakondathanuja@gmail.com"
+    stage('Commit & Push Helm Changes') {
+      steps {
+        withCredentials([usernamePassword(
+          credentialsId: 'GitHub',
+          usernameVariable: 'GIT_USER',
+          passwordVariable: 'GIT_TOKEN'
+        )]) {
+          sh """
+            git config user.name "thanuja"
+            git config user.email "ratakondathanuja@gmail.com"
 
-        git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
-        git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
+            git add frontend-hc/frontendvalues.yaml backend-hc/backendvalues.yaml
+            git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
 
-        git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
-      """
+            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_9.git master
+          """
+        }
+      }
     }
-  }
-}
+
+    /* =========================
+       APPLY K8S RESOURCES (Manifests)
+       ========================= */
+    stage('Apply Kubernetes & ArgoCD Resources') {
+      steps {
+        script {
+          // Apply Kubernetes resources
+          sh "kubectl apply -f k8s/ -n ${ENV}"
+
+          // Apply Argo CD configuration
+          sh "kubectl apply -f argocd/ -n argocd"
+        }
+      }
+    }
 
   }
 
   post {
     success {
-      echo " Argo CD will deploy automatically."
+      echo "Argo CD will deploy automatically."
     }
   }
 }
