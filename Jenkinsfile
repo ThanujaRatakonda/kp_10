@@ -163,18 +163,15 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-          // Apply ArgoCD resources if they are not already applied
-          sh """
-            kubectl get application backend -n argocd || kubectl apply -f argocd/backend_${params.ENV}.yaml
-            kubectl get application database -n argocd || kubectl apply -f argocd/database-${params.ENV}.yaml
-            kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend_${params.ENV}.yaml
-          """
-          
-          // Apply Kubernetes resources (PVC, PV, etc.)
-          sh """
+            sh """
             kubectl get pvc shared-pvc -n ${params.ENV} || kubectl apply -f k8s/shared-pvc_${params.ENV}.yaml -n ${params.ENV}
             kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv_${params.ENV}.yaml
             kubectl apply -f k8s/shared-storage-class.yaml
+          """
+          sh """
+            kubectl get application backend -n argocd || kubectl apply -f argocd/backend_${params.ENV}.yaml
+            kubectl get application frontend -n argocd || kubectl apply -f argocd/frontend_${params.ENV}.yaml
+            kubectl get application database -n argocd || kubectl apply -f argocd/database-app.yaml
           """
         }
       }
