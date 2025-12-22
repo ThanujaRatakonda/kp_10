@@ -94,10 +94,24 @@ pipeline {
         }
 
         // ---------- KUBERNETES APPLY ----------
-        stage('Apply Kubernetes Manifests') {
-            steps {
-                sh "kubectl apply -f k8s/ -n ${ENV}  || true "
-            }
-        }
+stage('Apply Kubernetes Manifests') {
+    steps {
+        sh '''
+        # Apply Namespace
+        envsubst < k8s/namespace.yaml | kubectl apply -f - || true
+
+        # Apply StorageClass only if it doesn't exist
+        kubectl get storageclass shared-storage >/dev/null 2>&1 || kubectl apply -f k8s/shared-storage-class.yaml
+
+        # Apply PV and PVC
+        kubectl apply -f k8s/shared-pv.yaml || true
+        envsubst < k8s/shared-pvc.yaml | kubectl apply -f - || true
+
+        # Apply all other resources safely
+        kubectl apply -f k8s/ --recursive -n ${ENV} || true
+        '''
+    }
+}
+
     }
 }
