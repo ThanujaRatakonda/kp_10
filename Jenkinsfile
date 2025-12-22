@@ -79,7 +79,9 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-          sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${params.ENV}.yaml
+        pwd
+          ls -l frontend-hc
+        sed -i 's/tag:.*/tag: "${IMAGE_TAG}"/' frontend-hc/frontendvalues_${params.ENV}.yaml
         """
       }
     }
