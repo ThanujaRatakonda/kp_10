@@ -1,4 +1,3 @@
-
 pipeline {
   agent any
 
@@ -39,11 +38,11 @@ pipeline {
 
     stage('Create Namespace') {
       steps {
-        sh """
+        sh '''
           set -e
           kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
           echo "Namespace ${params.ENV} is ready."
-        """
+        '''
       }
     }
 
@@ -59,6 +58,7 @@ pipeline {
             # Scale down apps that might hold the PVC (ignore errors)
             kubectl scale deploy backend-backend-hc -n ${params.ENV} --replicas=0 || true
             kubectl scale sts database-database-hc -n ${params.ENV} --replicas=0 || true
+            kubectl get pods -n ${params.ENV} || true
 
             # Remove PVC finalizers if stuck
             kubectl patch pvc shared-pvc -n ${params.ENV} -p '{"metadata":{"finalizers":[]}}' || true
@@ -75,24 +75,24 @@ pipeline {
     stage('Apply StorageClass, PV, PVC (static)') {
       steps {
         script {
-          def PV_FILE  = "k8s/shared-pv_${params.ENV}.yaml"
-          def PVC_FILE = "k8s/shared-pvc_${params.ENV}.yaml"
-          def PV_NAME  = "shared-pv-${params.ENV}"
+          def PV_FILE = "k8s/shared-pv_${params.ENV}.yaml"     // e.g., shared-pv_dev.yaml / shared-pv_qa.yaml
+          def PVC_FILE = "k8s/shared-pvc_${params.ENV}.yaml"   // e.g., shared-pvc_dev.yaml / shared-pvc_qa.yaml
+          def PV_NAME = "shared-pv-${params.ENV}"
 
           sh """
             set -e
 
-            # 1) StorageClass (static)
+            # 1) StorageClass (static) — must exist before PV/PVC
             echo "Applying StorageClass: shared-storage"
             kubectl apply -f k8s/shared-storage-class.yaml
             kubectl get storageclass shared-storage
 
-            # 2) PV (cluster-scoped)
+            # 2) PV is cluster-scoped — always apply (idempotent)
             echo "Applying PV: ${PV_NAME}"
             kubectl apply -f ${PV_FILE}
             kubectl get pv ${PV_NAME}
 
-            # 3) PVC (namespaced via YAML; do NOT use -n on apply)
+            # 3) PVC — YAML contains metadata.namespace, do NOT use -n for apply
             echo "Applying PVC: shared-pvc (namespace=${params.ENV})"
             kubectl apply -f ${PVC_FILE}
             kubectl get pvc shared-pvc -n ${params.ENV}
@@ -100,12 +100,12 @@ pipeline {
             # 4) Wait until PVC is Bound
             echo "Waiting for PVC shared-pvc to become Bound..."
             for i in {1..24}; do
-              PHASE=\$(kubectl get pvc shared-pvc -n ${params.ENV} -o jsonpath='{.status.phase}' || echo "")
-              if [ "\$PHASE" = "Bound" ]; then
+              PHASE=$(kubectl get pvc shared-pvc -n ${params.ENV} -o jsonpath='{.status.phase}' || echo "")
+              if [ "$PHASE" = "Bound" ]; then
                 echo "PVC is Bound ✅"
                 break
               fi
-              echo "PVC phase: \$PHASE (attempt \$i/24)"
+              echo "PVC phase: $PHASE (attempt $i/24)"
               sleep 5
             done
 
@@ -164,8 +164,8 @@ pipeline {
       steps {
         sh """
           set -e
-          # (optional) Update repository too if needed:
-          # sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/frontend#' frontend-hc/frontendvalues_${params.ENV}.yaml
+          # Update repository and tag in values file
+          sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/frontend#' frontend-hc/frontendvalues_${params.ENV}.yaml
           sed -i -E 's/^([[:space:]]*tag:[[:space:]]*).*/\\1${IMAGE_TAG}/' frontend-hc/frontendvalues_${params.ENV}.yaml
         """
       }
@@ -204,8 +204,8 @@ pipeline {
       steps {
         sh """
           set -e
-          # (optional) Update repository too if needed:
-          # sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/backend#' backend-hc/backendvalues_${params.ENV}.yaml
+          # Update repository and tag in values file
+          sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/backend#' backend-hc/backendvalues_${params.ENV}.yaml
           sed -i -E 's/^([[:space:]]*tag:[[:space:]]*).*/\\1${IMAGE_TAG}/' backend-hc/backendvalues_${params.ENV}.yaml
         """
       }
@@ -258,10 +258,10 @@ pipeline {
 
   post {
     always {
-      sh """
+      sh '''
         docker logout ${REGISTRY} || true
         docker image prune -f || true
-      """
+      '''
     }
   }
 }
