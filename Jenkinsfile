@@ -146,7 +146,7 @@ pipeline {
 
       // Apply remaining Kubernetes resources (excluding namespace.yaml)
       sh """
-        kubectl apply -f k8s/ --namespace=${params.ENV}
+        find k8s/ -type f ! -name 'namespace.yaml' -exec kubectl apply -f {} --namespace=${params.ENV} \;
       """
 
       // Apply ArgoCD resources separately
