@@ -24,12 +24,11 @@ pipeline {
     booleanParam(
       name: 'RESET_STORAGE',
       defaultValue: false,
-      description: 'If true, delete PV/PVC for this ENV before re-applying (unsticks Terminating/finalizers)'
+      description: 'If true, delete PV/PVC for this ENV before re-applying'
     )
   }
 
   stages {
-
     stage('Checkout') {
       steps {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
@@ -39,9 +38,11 @@ pipeline {
     stage('Create Namespace') {
       steps {
         script {
-          // Replace Groovy interpolation with string concatenation to avoid conflict
-          sh 'kubectl get namespace ' + params.ENV + ' >/dev/null 2>&1 || kubectl create namespace ' + params.ENV
-          echo "Namespace ${params.ENV} is ready."
+          def ENV_NS = params.ENV
+          sh """
+            kubectl get namespace ${ENV_NS} >/dev/null 2>&1 || kubectl create namespace ${ENV_NS}
+            echo "Namespace ${ENV_NS} is ready."
+          """
         }
       }
     }
@@ -50,69 +51,65 @@ pipeline {
       when { expression { params.RESET_STORAGE } }
       steps {
         script {
-          def PV_NAME = "shared-pv-${params.ENV}"
+          def ENV_NS = params.ENV
+          def PV_NAME = "shared-pv-${ENV_NS}"
+          
           sh """
             set -e
-            echo "RESET_STORAGE=true: cleaning PV/PVC for ENV=${params.ENV}"
+            echo "RESET_STORAGE=true: cleaning PV/PVC for ENV=${ENV_NS}"
 
-            # Scale down apps that might hold the PVC (ignore errors)
-            kubectl scale deploy backend-backend-hc -n ${params.ENV} --replicas=0 || true
-            kubectl scale sts database-database-hc -n ${params.ENV} --replicas=0 || true
-            kubectl get pods -n ${params.ENV} || true
+            # Scale down apps
+            kubectl scale deploy backend-backend-hc -n ${ENV_NS} --replicas=0 || true
+            kubectl scale sts database-database-hc -n ${ENV_NS} --replicas=0 || true
 
-            # Remove PVC finalizers if stuck
-            kubectl patch pvc shared-pvc -n ${params.ENV} -p '{"metadata":{"finalizers":[]}}' || true
-            kubectl delete pvc shared-pvc -n ${params.ENV} --force --grace-period=0 || true
+            # Remove PVC finalizers (FIXED JSON ESCAPING)
+            kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{\"metadata\":{\"finalizers\":[]}}' || true
+            kubectl delete pvc shared-pvc -n ${ENV_NS} --force --grace-period=0 || true
 
-            # Remove PV finalizers if stuck
-            kubectl patch pv ${PV_NAME} -p '{"metadata":{"finalizers":[]}}' || true
+            # Remove PV finalizers
+            kubectl patch pv ${PV_NAME} -p '{\"metadata\":{\"finalizers\":[]}}' || true
             kubectl delete pv ${PV_NAME} --force --grace-period=0 || true
           """
         }
       }
     }
 
-    stage('Apply StorageClass, PV, PVC (static)') {
+    stage('Apply StorageClass, PV, PVC') {
       steps {
         script {
-          def PV_FILE = "k8s/shared-pv_${params.ENV}.yaml"     // e.g., shared-pv_dev.yaml / shared-pv_qa.yaml
-          def PVC_FILE = "k8s/shared-pvc_${params.ENV}.yaml"   // e.g., shared-pvc_dev.yaml / shared-pvc_qa.yaml
-          def PV_NAME = "shared-pv-${params.ENV}"
+          def ENV_NS = params.ENV
+          def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
+          def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
+          def PV_NAME = "shared-pv-${ENV_NS}"
 
           sh """
             set -e
 
-            # 1) StorageClass (static) — must exist before PV/PVC
-            echo "Applying StorageClass: shared-storage"
-            kubectl apply -f k8s/shared-storage-class.yaml
+            # 1) StorageClass (cluster-wide)
+            kubectl apply -f k8s/shared-storage-class.yaml || true
             kubectl get storageclass shared-storage
 
-            # 2) PV is cluster-scoped — always apply (idempotent)
-            echo "Applying PV: ${PV_NAME}"
-            kubectl apply -f ${PV_FILE}
+            # 2) PV (cluster-scoped)
+            echo "Applying PV: ${PV_NAME} from ${PV_FILE}"
+            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE} || echo "PV file not found"
             kubectl get pv ${PV_NAME}
 
-            # 3) PVC — YAML contains metadata.namespace, do NOT use -n for apply
-            echo "Applying PVC: shared-pvc (namespace=${params.ENV})"
-            kubectl apply -f ${PVC_FILE}
-            kubectl get pvc shared-pvc -n ${params.ENV}
+            # 3) PVC (namespace-specific)
+            echo "Applying PVC from ${PVC_FILE}"
+            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE} || echo "PVC file not found"
+            kubectl get pvc shared-pvc -n ${ENV_NS}
 
-            # 4) Wait until PVC is Bound
-            echo "Waiting for PVC shared-pvc to become Bound..."
-            for i in {1..24}; do
-              PHASE=$(kubectl get pvc shared-pvc -n ${params.ENV} -o jsonpath='{.status.phase}' || echo "")
-              if [ "$PHASE" = "Bound" ]; then
+            # 4) Wait for PVC to bind
+            echo "Waiting for PVC shared-pvc to become Bound in ${ENV_NS}..."
+            for i in {1..30}; do
+              PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+              if [ "\$PHASE" = "Bound" ]; then
                 echo "PVC is Bound ✅"
                 break
               fi
-              echo "PVC phase: $PHASE (attempt $i/24)"
+              echo "PVC phase: \$PHASE (attempt \$i/30)"
               sleep 5
             done
-
-            echo "PVC status:"
-            kubectl describe pvc shared-pvc -n ${params.ENV} | sed -n '1,120p'
-            echo "PV status:"
-            kubectl describe pv ${PV_NAME} | sed -n '1,80p'
           """
         }
       }
@@ -120,38 +117,27 @@ pipeline {
 
     stage('Create Docker Registry Secret') {
       steps {
-        sh """
-          set -e
-          kubectl get secret regcred -n ${params.ENV} >/dev/null 2>&1 || kubectl create secret docker-registry regcred -n ${params.ENV} \
-            --docker-server=${REGISTRY} \
-            --docker-username=${DOCKER_USERNAME} \
-            --docker-password=${DOCKER_PASSWORD}
-          kubectl get secret regcred -n ${params.ENV}
-        """
-      }
-    }
-
-    /* =========================
-       FRONTEND
-       ========================= */
-    stage('Build Frontend Image') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
-      steps {
-        sh "docker build -t frontend:${IMAGE_TAG} ./frontend"
-      }
-    }
-
-    stage('Push Frontend Image') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
-      steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'harbor-creds',
-          usernameVariable: 'USER',
-          passwordVariable: 'PASS'
-        )]) {
+        script {
+          def ENV_NS = params.ENV
           sh """
-            set -e
-            echo "\$PASS" | docker login ${REGISTRY} -u "\$USER" --password-stdin
+            kubectl get secret regcred -n ${ENV_NS} >/dev/null 2>&1 || \\
+            kubectl create secret docker-registry regcred -n ${ENV_NS} \\
+              --docker-server=${REGISTRY} \\
+              --docker-username=${DOCKER_USERNAME} \\
+              --docker-password=${DOCKER_PASSWORD}
+            kubectl get secret regcred -n ${ENV_NS}
+          """
+        }
+      }
+    }
+
+    stage('Build & Push Frontend') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
+      steps {
+        script {
+          sh """
+            docker build -t frontend:${IMAGE_TAG} ./frontend
+            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
             docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           """
@@ -159,39 +145,13 @@ pipeline {
       }
     }
 
-    stage('Update Frontend Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
-      steps {
-        sh """
-          set -e
-          # Update repository and tag in values file
-          sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/frontend#' frontend-hc/frontendvalues_${params.ENV}.yaml
-          sed -i -E 's/^([[:space:]]*tag:[[:space:]]*).*/\\1${IMAGE_TAG}/' frontend-hc/frontendvalues_${params.ENV}.yaml
-        """
-      }
-    }
-
-    /* =========================
-       BACKEND
-       ========================= */
-    stage('Build Backend Image') {
+    stage('Build & Push Backend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
-        sh "docker build -t backend:${IMAGE_TAG} ./backend"
-      }
-    }
-
-    stage('Push Backend Image') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
-      steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'harbor-creds',
-          usernameVariable: 'USER',
-          passwordVariable: 'PASS'
-        )]) {
+        script {
           sh """
-            set -e
-            echo "\$PASS" | docker login ${REGISTRY} -u "\$USER" --password-stdin
+            docker build -t backend:${IMAGE_TAG} ./backend
+            echo "\${DOCKER_PASSWORD}" | docker login ${REGISTRY} -u ${DOCKER_USERNAME} --password-stdin
             docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
             docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           """
@@ -199,69 +159,68 @@ pipeline {
       }
     }
 
-    stage('Update Backend Helm Values') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
+    stage('Update Helm Values') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
-        sh """
-          set -e
-          # Update repository and tag in values file
-          sed -i -E 's#^([[:space:]]*repository:[[:space:]]*).*$#\\1${REGISTRY}/${PROJECT}/backend#' backend-hc/backendvalues_${params.ENV}.yaml
-          sed -i -E 's/^([[:space:]]*tag:[[:space:]]*).*/\\1${IMAGE_TAG}/' backend-hc/backendvalues_${params.ENV}.yaml
-        """
-      }
-    }
-
-    /* =========================
-       COMMIT FOR ARGO CD
-       ========================= */
-    stage('Commit & Push Helm Changes') {
-      steps {
-        withCredentials([usernamePassword(
-          credentialsId: 'GitHub',
-          usernameVariable: 'GIT_USER',
-          passwordVariable: 'GIT_TOKEN'
-        )]) {
+        script {
+          def ENV_NS = params.ENV
           sh """
             set -e
-            git config user.name "Thanuja"
-            git config user.email "ratakondathanuja@gmail.com"
-            git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
-            git commit -m "Update images to tag ${IMAGE_TAG}" || echo "No changes"
-            git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+            # Frontend values
+            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${ENV_NS}.yaml
+            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${ENV_NS}.yaml
+            
+            # Backend values  
+            sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${ENV_NS}.yaml
+            sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${ENV_NS}.yaml
           """
         }
       }
     }
 
-    /* =========================
-       Apply ArgoCD Application manifests
-       ========================= */
+    stage('Commit Helm Changes') {
+      steps {
+        script {
+          def ENV_NS = params.ENV
+          withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+            sh """
+              git config user.name "Thanuja"
+              git config user.email "ratakondathanuja@gmail.com"
+              git add frontend-hc/frontendvalues_${ENV_NS}.yaml backend-hc/backendvalues_${ENV_NS}.yaml
+              git commit -m "chore: update images to ${IMAGE_TAG} for ${ENV_NS}" || echo "No changes"
+              git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+            """
+          }
+        }
+      }
+    }
+
     stage('Apply ArgoCD Resources') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
-        sh """
-          set -e
-          kubectl apply -f argocd/backend_${params.ENV}.yaml
-          kubectl apply -f argocd/frontend_${params.ENV}.yaml
-          kubectl apply -f argocd/database-app.yaml
+        script {
+          def ENV_NS = params.ENV
+          sh """
+            kubectl apply -f argocd/backend_${ENV_NS}.yaml
+            kubectl apply -f argocd/frontend_${ENV_NS}.yaml
+            kubectl apply -f argocd/database-app.yaml
 
-          # Force refresh to avoid Unknown status due to cache
-          kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application backend  -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            # Force ArgoCD refresh
+            kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
+            kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
 
-          kubectl get application -n argocd
-        """
+            kubectl get applications -n argocd
+          """
+        }
       }
     }
   }
 
   post {
     always {
-      sh '''
-        docker logout ${REGISTRY} || true
-        docker image prune -f || true
-      '''
+      sh 'docker logout ${REGISTRY} || true'
+      sh 'docker image prune -f || true'
     }
   }
 }
