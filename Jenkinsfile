@@ -30,9 +30,6 @@ pipeline {
       }
     }
 
-    /* =========================
-       Create Namespaces if not exist
-       ========================= */
     stage('Create Namespaces if not exist') {
       steps {
         script {
@@ -43,9 +40,19 @@ pipeline {
       }
     }
 
-    /* =========================
-       Create Docker Registry Secret if it doesn't exist
-       ========================= */
+    stage('Create and Apply Persistent Storage Resources') {
+      steps {
+        script {
+          // Apply PV and PVC for the environment
+          sh """
+            kubectl get pv shared-pv-dev || kubectl apply -f k8s/shared-pv_dev.yaml
+            kubectl get pvc shared-pvc -n ${params.ENV} || kubectl apply -f k8s/shared-pvc_${params.ENV}.yaml
+            kubectl get storageclass shared-storage || kubectl apply -f k8s/shared-storage-class.yaml
+          """
+        }
+      }
+    }
+
     stage('Create Docker Registry Secret') {
       steps {
         script {
@@ -163,9 +170,9 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'ARGOCD_ONLY'] } }
       steps {
         script {
-          sh """
+            sh """
             kubectl get pvc shared-pvc -n ${params.ENV} || kubectl apply -f k8s/shared-pvc_${params.ENV}.yaml -n ${params.ENV}
-            kubectl get pv shared-pv || kubectl apply -f k8s/shared-pv_${params.ENV}.yaml
+            kubectl get pv shared-pv-dev || kubectl apply -f k8s/shared-pv_dev.yaml
             kubectl apply -f k8s/shared-storage-class.yaml
           """
           sh """
