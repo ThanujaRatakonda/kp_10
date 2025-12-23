@@ -113,13 +113,14 @@ pipeline {
       steps {
         script {
           sh """
-            set -e
+             set -e
             echo "Deploying Database to ${params.ENV}..."
-            helm upgrade --install database-database-hc ./database-hc \\
-              --namespace ${params.ENV} --values database-hc/databasevalues_${params.ENV}.yaml
-            kubectl rollout status sts/database-database-hc -n ${params.ENV} --timeout=300s
-            echo "Database ready!"
-          """
+           helm upgrade --install database ./database-hc \\
+            --namespace ${params.ENV} --values database-hc/databasevalues_${params.ENV}.yaml
+            kubectl rollout status sts/database -n ${params.ENV} --timeout=300s
+             echo "Database ready!"
+            """
+
         }
       }
     }
