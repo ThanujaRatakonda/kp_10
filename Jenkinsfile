@@ -114,14 +114,22 @@ pipeline {
         script {
           sh """
              set -e
-      docker build -t frontend:"${IMAGE_TAG}" ./frontend
-      docker tag frontend:"${IMAGE_TAG}" ${REGISTRY}/${PROJECT}/frontend:"${IMAGE_TAG}"
-      docker push ${REGISTRY}/${PROJECT}/frontend:"${IMAGE_TAG}"
-      docker rmi frontend:"${IMAGE_TAG}" || true
-      docker image prune -f || true
-      echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
-    """
-
+        echo "Deploying Database for ${params.ENV}..."
+        # Apply database manifests (StatefulSet/Deployment + Service)
+        kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
+        kubectl apply -f k8s/database-service.yaml -n ${params.ENV} || true
+        # Wait for database pod to be ready (max 2 minutes)
+        for i in {1..24}; do
+          READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+          STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
+          
+          echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
+          [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
+          
+          sleep 5
+        done
+        kubectl get svc -l app=database -n ${params.ENV}
+      """
         }
       }
     }
