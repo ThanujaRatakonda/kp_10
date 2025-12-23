@@ -18,6 +18,11 @@ pipeline {
       choices: ['dev', 'qa'],
       description: 'Choose environment (dev/qa)'
     )
+    choice(
+      name: 'VERSION_BUMP',
+      choices: ['patch', 'minor', 'major'],
+      description: 'Choose version bump: patch/minor/major'
+    )
   }
 
   stages {
@@ -27,7 +32,10 @@ pipeline {
       }
     }
 
-    stage('Read & Auto-Increment Version') {
+    stage('Read & Update Version') {
+      when {
+        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+      }
       steps {
         script {
           def versionFile = 'version.txt'
@@ -43,11 +51,14 @@ pipeline {
               def minor = parts[1].toInteger()
               def patch = parts[2].toInteger()
               
-              if (patch >= 9) {
-                newVersion = "v${major}.${minor + 1}.0"
-              } else {
+              if (params.VERSION_BUMP == 'patch') {
                 newVersion = "v${major}.${minor}.${patch + 1}"
+              } else if (params.VERSION_BUMP == 'minor') {
+                newVersion = "v${major}.${minor + 1}.0"
+              } else if (params.VERSION_BUMP == 'major') {
+                newVersion = "v${major + 1}.0.0"
               }
+              echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
             } else {
               newVersion = "v1.0.1"
             }
@@ -57,7 +68,7 @@ pipeline {
           
           env.IMAGE_TAG = newVersion
           writeFile file: versionFile, text: newVersion
-          echo " New version: ${env.IMAGE_TAG}"
+          echo "New version: ${env.IMAGE_TAG}"
         }
       }
     }
@@ -114,46 +125,40 @@ pipeline {
         script {
           sh """
              set -e
-        echo "Deploying Database for ${params.ENV}..."
-        # Apply database manifests (StatefulSet/Deployment + Service)
-        kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
-        # Wait for database pod to be ready (max 2 minutes)
-        for i in {1..24}; do
-          READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
-          STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
-          
-          echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
-          [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
-          
-          sleep 5
-        done
-        kubectl get svc -l app=database -n ${params.ENV}
-      """
+            echo "Deploying Database for ${params.ENV}..."
+            kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
+            for i in {1..24}; do
+              READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+              STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
+              echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
+              [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
+              sleep 5
+            done
+            kubectl get svc -l app=database -n ${params.ENV}
+          """
         }
       }
     }
 
-
-stage('Docker Login') {
-  when {
-    expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
-  }
-  steps {
-    withCredentials([
-      usernamePassword(
-        credentialsId: 'harbor-creds',
-        usernameVariable: 'HARBOR_USER',
-        passwordVariable: 'HARBOR_PASS'
-      )
-    ]) {
-      sh """
-        echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
-        echo "Docker login successful"
-      """
+    stage('Docker Login') {
+      when {
+        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+      }
+      steps {
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'harbor-creds',
+            usernameVariable: 'HARBOR_USER',
+            passwordVariable: 'HARBOR_PASS'
+          )
+        ]) {
+          sh """
+            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
+            echo "Docker login successful"
+          """
+        }
+      }
     }
-  }
-}
-
 
     stage('Build & Push Frontend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
@@ -165,7 +170,7 @@ stage('Docker Login') {
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker rmi frontend:${IMAGE_TAG} || true
           docker image prune -f || true
-          echo " Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
+          echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
     }
@@ -180,12 +185,11 @@ stage('Docker Login') {
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker rmi backend:${IMAGE_TAG} || true
           docker image prune -f || true
-          echo " Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
+          echo "Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
     }
 
-    // ... rest of your stages remain SAME
     stage('Update & Commit Helm Values') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
@@ -205,7 +209,7 @@ stage('Docker Login') {
               git config user.email "ratakondathanuja@gmail.com"
               git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
               git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
-              git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
             """
           }
         }
@@ -239,7 +243,6 @@ stage('Docker Login') {
             kubectl get pods -n ${params.ENV}
             kubectl get svc -n ${params.ENV}
             kubectl get applications -n argocd
-            
           """
         }
       }
