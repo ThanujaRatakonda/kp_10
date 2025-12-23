@@ -214,7 +214,7 @@ pipeline {
             kubectl get pods -n ${params.ENV}
             kubectl get svc -n ${params.ENV}
             kubectl get applications -n argocd
-            sh 'docker image prune -f || true'
+            
           """
         }
       }
