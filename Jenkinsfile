@@ -28,21 +28,45 @@ pipeline {
         git credentialsId: 'git-creds', url: "${GIT_REPO}", branch: 'master'
       }
     }
-stage('Read Version') { 
+
+    stage('Read & Auto-Increment Version') {
       steps {
         script {
           def versionFile = 'version.txt'
+          def newVersion
+          
           if (fileExists(versionFile)) {
-            env.IMAGE_TAG = readFile(versionFile).trim()
-            echo " Version from ${versionFile}: ${env.IMAGE_TAG}"
+            def currentVersion = readFile(versionFile).trim()
+            echo "Current version: ${currentVersion}"
+            
+            // Parse semantic version (v1.0.0 -> 1.0.0)
+            def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
+            if (parts.size() == 3) {
+              def major = parts[0].toInteger()
+              def minor = parts[1].toInteger()
+              def patch = parts[2].toInteger()
+              
+              if (patch >= 9) {
+                // v1.0.9+ → v1.1.0 (reset patch to 0, increment minor)
+                newVersion = "v${major}.${minor + 1}.0"
+              } else {
+                // Normal increment: v1.0.5 → v1.0.6
+                newVersion = "v${major}.${minor}.${patch + 1}"
+              }
+            } else {
+              newVersion = "v1.0.1"
+            }
           } else {
-            env.IMAGE_TAG = "latest"
-            writeFile file: versionFile, text: env.IMAGE_TAG
-            echo "Created ${versionFile} with: latest"
+            newVersion = "v1.0.0"
           }
+          
+          env.IMAGE_TAG = newVersion
+          writeFile file: versionFile, text: newVersion
+          echo "✅ New version: ${env.IMAGE_TAG}"
         }
       }
     }
+
     stage('Create Namespace') {
       steps {
         script {
@@ -158,7 +182,7 @@ stage('Read Version') {
             sh """
               git config user.name "Thanuja"
               git config user.email "ratakondathanuja@gmail.com"
-              git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml
+              git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
               git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
               git push https://\${GIT_USER}:\${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
             """
