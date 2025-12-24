@@ -76,30 +76,43 @@ pipeline {
     }
 
     stage('Apply Storage') {
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
-          def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
-          
-          sh """
-            set -e
-            echo "Applying storage for ${ENV_NS}..."
-            kubectl apply -f k8s/shared-storage-class.yaml || true
-            test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
-            kubectl get pv shared-pv-${ENV_NS}
-            test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
-            
-            for i in {1..30}; do
-              PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
-              [ "\$PHASE" = "Bound" ] && echo "PVC Bound!" && break
-              echo "PVC: \$PHASE (\$i/30)"
-              sleep 5
-            done
-          """
-        }
-      }
+  steps {
+    script {
+      def ENV_NS = params.ENV
+      def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
+      def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
+      
+      sh """
+        set -e
+        echo " Cleaning stuck storage for ${ENV_NS}..."
+        
+        # NUCLEAR CLEANUP - Delete stuck PV/PVC if exists
+        kubectl delete pvc shared-pvc -n ${ENV_NS} --ignore-not-found=true
+        kubectl delete pv shared-pv-${ENV_NS} --ignore-not-found=true
+        
+        echo "Applying fresh storage for ${ENV_NS}..."
+        kubectl apply -f k8s/shared-storage-class.yaml || true
+        test -f ${PV_FILE} && kubectl apply -f ${PV_FILE}
+        kubectl get pv shared-pv-${ENV_NS}
+        test -f ${PVC_FILE} && kubectl apply -f ${PVC_FILE}
+        
+        # WAIT FOR PVC TO BIND (with timeout)
+        for i in {1..60}; do
+          PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          if [ "\$PHASE" = "Bound" ]; then 
+            echo "PVC Bound successfully!"
+            break
+          fi
+          echo " PVC: \$PHASE (\$i/60)"
+          sleep 3
+          [ \$i -eq 60 ] && echo " PVC FAILED TO BIND!" && exit 1
+        done
+        
+        echo " Storage ready for ${ENV_NS}"
+      """
     }
+  }
+}
 
     stage('Apply Docker Secret') {
       steps {
