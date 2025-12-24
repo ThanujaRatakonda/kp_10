@@ -72,55 +72,53 @@ pipeline {
     }
 
     stage('Apply Storage') {
-      steps {
-        script {
-          def ENV_NS = params.ENV
-          def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
-          def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
-          
-          sh """
-            echo "🔧 Cleaning ALL stuck storage for ${ENV_NS}..."
-            
-            # HARSH CLEANUP
-            kubectl delete pvc --all -n ${ENV_NS} --ignore-not-found=true || true
-            kubectl delete pv shared-pv-${ENV_NS} --ignore-not-found=true || true
-            
-            # CREATE HOST PATH
-            sudo mkdir -p /data/shared-${ENV_NS} || mkdir -p /data/shared-${ENV_NS}
-            sudo chmod 777 /data/shared-${ENV_NS} || chmod 777 /data/shared-${ENV_NS}
-            
-            echo "📦 Applying FRESH storage for ${ENV_NS}..."
-            kubectl apply -f k8s/shared-storage-class.yaml
-            kubectl apply -f ${PV_FILE}
-            kubectl apply -f ${PVC_FILE}
-            
-            echo "⏳ Waiting for PVC to bind (180s timeout)..."
-            timeout 180 sh -c '
-              for i in {1..60}; do
-                PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath=\\"{.status.phase}\\" 2>/dev/null || echo "Pending")
-                VOLUME=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath=\\"{.spec.volumeName}\\" 2>/dev/null || echo "None")
-                
-                echo "PVC[\$i]: \$PHASE | Volume: \$VOLUME"
-                
-                if [ "\$PHASE" = "Bound" ] && [ "\$VOLUME" != "None" ]; then
-                  echo "✅ PVC BOUND SUCCESSFULLY!"
-                  exit 0
-                fi
-                sleep 3
-              done
-              echo "❌ PVC TIMEOUT - DEBUG INFO:"
-              kubectl get pvc -n ${ENV_NS}
-              kubectl get pv shared-pv-${ENV_NS}
-              kubectl describe pvc shared-pvc -n ${ENV_NS}
-              exit 1
-            ' || (echo "PVC FAILED!" && exit 1)
-            
-            echo "💾 STORAGE READY FOR ${ENV_NS}!"
-            kubectl get pvc,pv -n ${ENV_NS}
-          """
-        }
-      }
+  steps {
+    script {
+      def ENV_NS = params.ENV
+      def PV_FILE = "k8s/shared-pv_${ENV_NS}.yaml"
+      def PVC_FILE = "k8s/shared-pvc_${ENV_NS}.yaml"
+      
+      sh """
+        echo "🔧 FORCE CLEANING STUCK STORAGE for ${ENV_NS}..."
+        
+        # KILL STUCK FINALIZERS FIRST (CRITICAL!)
+        kubectl patch pvc shared-pvc -n ${ENV_NS} -p '{"metadata":{"finalizers":null}}' --timeout=30s || true
+        kubectl delete pvc shared-pvc -n ${ENV_NS} --grace-period=0 --force || true
+        kubectl delete pv shared-pv-${ENV_NS} --grace-period=0 --force || true
+        
+        # Wait for cleanup
+        sleep 5
+        
+        # CREATE HOST PATH
+        mkdir -p /data/shared-${ENV_NS} || sudo mkdir -p /data/shared-${ENV_NS}
+        chmod 777 /data/shared-${ENV_NS} || sudo chmod 777 /data/shared-${ENV_NS}
+        
+        echo "📦 Applying FRESH storage..."
+        kubectl apply -f k8s/shared-storage-class.yaml
+        kubectl apply -f ${PV_FILE}
+        kubectl apply -f ${PVC_FILE}
+        
+        echo "⏳ SIMPLE WAIT FOR PVC BIND (no complex loops)..."
+        for i in {1..30}; do
+          sleep 6
+          PHASE=\$(kubectl get pvc shared-pvc -n ${ENV_NS} -o jsonpath='{.status.phase}' 2>/dev/null || echo "ERROR")
+          if [ "\$PHASE" = "Bound" ]; then 
+            echo "✅ PVC BOUND IN ${i}s!"
+            kubectl get pvc -n ${ENV_NS}
+            exit 0
+          fi
+          echo "PVC [\$i/30]: \$PHASE"
+        done
+        
+        echo "❌ PVC FAILED! DEBUG:"
+        kubectl get pvc -n ${ENV_NS} -o yaml
+        kubectl get pv | grep ${ENV_NS}
+        kubectl describe pvc shared-pvc -n ${ENV_NS}
+        exit 1
+      """
     }
+  }
+}
 
     stage('Apply Docker Secret') {
       steps {
