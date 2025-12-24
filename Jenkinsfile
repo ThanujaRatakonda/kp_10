@@ -32,46 +32,47 @@ pipeline {
       }
     }
 
-    stage('Read & Update Version') {
-      when {
-        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
-      }
-      steps {
-        script {
-          def versionFile = 'version.txt'
-          def newVersion
+      stage('Read & Update Version') {
+  when {
+    expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+  }
+  steps {
+    script {
+      def versionFile = 'version.txt'
+      def newVersion
+      
+      if (fileExists(versionFile)) {
+        def currentVersion = readFile(versionFile).trim()
+        echo "Current version: ${currentVersion}"
+        
+        def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
+        if (parts.size() == 3) {
+          def major = parts[0].toInteger()
+          def minor = parts[1].toInteger()
+          def patch = parts[2].toInteger()
           
-          if (fileExists(versionFile)) {
-            def currentVersion = readFile(versionFile).trim()
-            echo "Current version: ${currentVersion}"
-            
-            def parts = currentVersion.replaceAll(/^v/, '').tokenize('.')
-            if (parts.size() == 3) {
-              def major = parts[0].toInteger()
-              def minor = parts[1].toInteger()
-              def patch = parts[2].toInteger()
-              
-              if (params.VERSION_BUMP == 'patch') {
-                newVersion = "v${major}.${minor}.${patch + 1}"
-              } else if (params.VERSION_BUMP == 'minor') {
-                newVersion = "v${major}.${minor + 1}.0"
-              } else if (params.VERSION_BUMP == 'major') {
-                newVersion = "v${major + 1}.0.0"
-              }
-              echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
-            } else {
-              newVersion = "v1.0.1"
-            }
-          } else {
-            newVersion = "v1.0.0"
+          if (params.VERSION_BUMP == 'patch') {
+            newVersion = "v${major}.${minor}.${patch + 1}"
+          } else if (params.VERSION_BUMP == 'minor') {
+            newVersion = "v${major}.${minor + 1}.0"
+          } else if (params.VERSION_BUMP == 'major') {
+            newVersion = "v${major + 1}.0.0"
           }
-          
-          env.IMAGE_TAG = newVersion
-          writeFile file: versionFile, text: newVersion
-          echo "New version: ${env.IMAGE_TAG}"
+          echo "User chose ${params.VERSION_BUMP}: ${newVersion}"
+        } else {
+          newVersion = "v1.0.1"
         }
+      } else {
+        newVersion = "v1.0.0"
       }
+      
+      env.IMAGE_TAG = newVersion
+      writeFile file: versionFile, text: newVersion
+      echo "New version: ${env.IMAGE_TAG}"
     }
+  }
+}
+
 
     stage('Create Namespace') {
       steps {
