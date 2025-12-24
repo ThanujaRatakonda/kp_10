@@ -104,7 +104,7 @@ pipeline {
     stage('Apply Docker Secret') {
       steps {
         sh """
-          kubectl apply -f docker-registry-secret.yaml
+          kubectl apply -f docker-registry-secret.yaml -n ${params.ENV} || true
           echo "Docker secret applied (dev+qa)"
         """
       }
