@@ -141,8 +141,8 @@ pipeline {
         sh """
           echo "🚀 Applying ArgoCD Applications for ${params.ENV}..."
           
-          # Apply Docker registry secret (needed for image pulls)
-          kubectl apply -f docker-registry-secret.yaml
+          # Apply Docker registry secret IGNORE ERRORS (multi-doc file handles both envs)
+          kubectl apply -f docker-registry-secret.yaml || true
           
           # Apply all ArgoCD apps (they auto-create namespaces)
           kubectl apply -f argocd/backend_${params.ENV}.yaml
@@ -216,8 +216,7 @@ pipeline {
         echo "=== PIPELINE SUMMARY ===
         ENV: ${params.ENV}
         ACTION: ${params.ACTION}
-        IMAGE_TAG: ${IMAGE_TAG ?: 'N/A'}
-        "
+        IMAGE_TAG: ${IMAGE_TAG ?: 'N/A'}"
         kubectl get pods -n ${params.ENV} -o wide || true
       """
     }
