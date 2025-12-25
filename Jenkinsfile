@@ -196,6 +196,7 @@ stage('Update & Commit Helm Values') {
 
     stage('Verify Deployment') {
       steps {
+        sh """
           kubectl get pods -n ${params.ENV}
           kubectl get svc -n ${params.ENV}
           kubectl get applications -n argocd | grep -E "(backend|frontend|database)"
