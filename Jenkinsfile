@@ -123,18 +123,43 @@ pipeline {
   }
 }
 
-    // ... ALL OTHER STAGES EXACTLY AS YOU HAVE ...
-    stage('Apply Docker Secret') {
+    stage('Deploy Database') {
+      when { expression { params.ACTION in ['FULL_PIPELINE', 'DATABASE_ONLY'] } }
       steps {
-        sh "kubectl apply -f docker-registry-secret.yaml || true && echo '✅ Docker secret OK'"
+        script {
+          sh """
+             set -e
+            echo "Deploying Database for ${params.ENV}..."
+            kubectl apply -f k8s/database-deployment.yaml -n ${params.ENV} || true
+            for i in {1..24}; do
+              READY=\$(kubectl get pod -l app=database -n ${params.ENV} -o jsonpath='{.items[0].status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+              STATUS=\$(kubectl get pod -l app=database -n ${params.ENV} --no-headers -o custom-columns=STATUS:.status.phase 2>/dev/null || echo "Pending")
+              echo "Database pod status: \$STATUS (ready: \$READY) (\$i/24)"
+              [ "\$READY" = "true" ] && [ "\$STATUS" = "Running" ] && echo "Database is READY!" && break
+              sleep 5
+            done
+            kubectl get svc -l app=database -n ${params.ENV}
+          """
+        }
       }
     }
 
     stage('Docker Login') {
-      when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+      when {
+        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
+      }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')]) {
-          sh "echo \"\$HARBOR_PASS\" | docker login ${REGISTRY} -u \"\$HARBOR_USER\" --password-stdin"
+        withCredentials([
+          usernamePassword(
+            credentialsId: 'harbor-creds',
+            usernameVariable: 'HARBOR_USER',
+            passwordVariable: 'HARBOR_PASS'
+          )
+        ]) {
+          sh """
+            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
+            echo "Docker login successful"
+          """
         }
       }
     }
@@ -143,9 +168,13 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
       steps {
         sh """
-          docker build -t ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG} ./frontend
+          set -e
+          docker build -t frontend:${IMAGE_TAG} ./frontend
+          docker tag frontend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}
-          echo "✅ Frontend pushed"
+          docker rmi frontend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo "Frontend: ${REGISTRY}/${PROJECT}/frontend:${IMAGE_TAG}"
         """
       }
     }
@@ -154,29 +183,38 @@ pipeline {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'BACKEND_ONLY'] } }
       steps {
         sh """
-          docker build -t ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG} ./backend
+          set -e
+          docker build -t backend:${IMAGE_TAG} ./backend
+          docker tag backend:${IMAGE_TAG} ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
           docker push ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}
-          echo "✅ Backend pushed"
+          docker rmi backend:${IMAGE_TAG} || true
+          docker image prune -f || true
+          echo "Backend: ${REGISTRY}/${PROJECT}/backend:${IMAGE_TAG}"
         """
       }
     }
-
-    stage('Update & Commit Helm Values') {
+stage('Update & Commit Helm Values') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
       steps {
-        withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+        script {
           sh """
+            set -e
+            echo "Updating Helm values..."
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/frontend|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' frontend-hc/frontendvalues_${params.ENV}.yaml
             sed -i 's|repository:.*|repository: ${REGISTRY}/${PROJECT}/backend|' backend-hc/backendvalues_${params.ENV}.yaml
             sed -i 's|tag:.*|tag: ${IMAGE_TAG}|' backend-hc/backendvalues_${params.ENV}.yaml
-            
-            git config user.name "Thanuja"
-            git config user.email "ratakondathanuja@gmail.com"
-            git add .
-            git commit -m "chore: ${IMAGE_TAG} ${params.ENV}" || true
-            git push https://\$GIT_USER:\$GIT_TOKEN@github.com/ThanujaRatakonda/kp_10.git master
           """
+
+          withCredentials([usernamePassword(credentialsId: 'GitHub', usernameVariable: 'GIT_USER', passwordVariable: 'GIT_TOKEN')]) {
+            sh """
+              git config user.name "Thanuja"
+              git config user.email "ratakondathanuja@gmail.com"
+              git add frontend-hc/frontendvalues_${params.ENV}.yaml backend-hc/backendvalues_${params.ENV}.yaml version.txt
+              git commit -m "chore: images ${IMAGE_TAG} for ${params.ENV}" || echo "No changes"
+              git push https://${GIT_USER}:${GIT_TOKEN}@github.com/ThanujaRatakonda/kp_10.git master
+            """
+          }
         }
       }
     }
