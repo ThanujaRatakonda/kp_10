@@ -44,36 +44,29 @@ pipeline {
         def currentPatch = fileExists(patchFile) ? readFile(patchFile).trim().toInteger() : -1 
         newVersion = "v1.0.${currentPatch + 1}"  // reads current version, increments it & set the new version
         writeFile file: patchFile, text: "${currentPatch + 1}"
-
       } else if (params.VERSION_BUMP == 'minor') {
-
         def minorFile = 'minor_counter.txt'
         def currentMinor = fileExists(minorFile) ? readFile(minorFile).trim().toInteger() : -1
         newVersion = "v1.1.${currentMinor + 1}"
         writeFile file: minorFile, text: "${currentMinor + 1}"
-
       } else if (params.VERSION_BUMP == 'major') {
-
         def majorFile = 'major_counter.txt'
         def currentMajor = fileExists(majorFile) ? readFile(majorFile).trim().toInteger() : -1
         newVersion = "v2.0.${currentMajor + 1}"
         writeFile file: majorFile, text: "${currentMajor + 1}"
       }
-
       env.IMAGE_TAG = newVersion
       writeFile file: 'version.txt', text: newVersion  // Current build version
       echo "${params.VERSION_BUMP} → ${newVersion}"
     }
   }
 }
-
-
     stage('Create Namespace') {
       steps {
         sh """
           kubectl get namespace ${params.ENV} >/dev/null 2>&1 || kubectl create namespace ${params.ENV}
           kubectl get namespace argocd >/dev/null 2>&1 || kubectl create namespace argocd
-          echo "✅ Namespaces: ${params.ENV} + argocd"
+          echo " Namespaces: ${params.ENV} + argocd"
         """
       }
     }
@@ -83,41 +76,29 @@ pipeline {
     timeout(time: 8, unit: 'MINUTES') {
       sh """
         ENV_NS="${params.ENV}"
-        echo "🔧 Storage for \$ENV_NS..."
-        
-        # 🔥 QA FIX: Clean stuck Released PV (dev skips this naturally)
         if [ "\$ENV_NS" = "qa" ]; then
-          echo "🔥 QA: Clearing stuck PV..."
           kubectl patch pv shared-pv-\$ENV_NS -p '{"spec":{"claimRef":null}}' || true
           kubectl delete pvc shared-pvc -n \$ENV_NS --ignore-not-found=true || true
           sleep 5
         fi
-        
-        # Apply fresh
         kubectl apply -f k8s/shared-storage-class.yaml || true
         kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
         sleep 3
         kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
-        
-        # Wait PV Available
-        echo "⏳ PV Available..."
         for i in {1..12}; do
           PV_STATUS=\$(kubectl get pv shared-pv-\$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
           echo "PV[\$i/12]: \$PV_STATUS"
           [ "\$PV_STATUS" = "Available" ] && break || sleep 5
         done
-        
-        # Wait PVC Bound
-        echo "⏳ PVC Bound..."
         for i in {1..30}; do
           PHASE=\$(kubectl get pvc shared-pvc -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
           echo "PVC[\$i/30]: \$PHASE"
-          [ "\$PHASE" = "Bound" ] && echo "✅ PVC BOUND!" && break || sleep 5
+          [ "\$PHASE" = "Bound" ] && echo " PVC BOUND!" && break || sleep 5
         done
         
         kubectl get pv shared-pv-\$ENV_NS
         kubectl get pvc shared-pvc -n \$ENV_NS
-        echo "✅ STORAGE PERFECT!"
+        echo " STORAGE PERFECT!"
       """
     }
   }
@@ -208,15 +189,13 @@ stage('Update & Commit Helm Values') {
           kubectl annotate application backend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
           kubectl annotate application frontend -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
           kubectl annotate application database -n argocd argocd.argoproj.io/refresh=hard --overwrite || true
-          echo "✅ ArgoCD refreshed"
+          echo " ArgoCD refreshed"
         """
       }
     }
 
     stage('Verify Deployment') {
       steps {
-        sh """
-          echo "=== FINAL STATUS ${params.ENV} ==="
           kubectl get pods -n ${params.ENV}
           kubectl get svc -n ${params.ENV}
           kubectl get applications -n argocd | grep -E "(backend|frontend|database)"
