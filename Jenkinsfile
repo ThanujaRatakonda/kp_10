@@ -82,30 +82,43 @@ stage('Apply Storage') {
     timeout(time: 8, unit: 'MINUTES') {
       sh """
         ENV_NS="${params.ENV}"
-        kubectl patch pv shared-pv-\$ENV_NS -p '{"spec":{"claimRef":null}}' || true
+        PV_NAME="shared-pv-\$ENV_NS"
+        PVC_NAME="shared-pvc"
         
-        kubectl delete pvc shared-pvc -n \$ENV_NS --force --grace-period=0 --ignore-not-found=true || true
-        sleep 10  # Wait for PVC fully gone
+        PVC_STATUS=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "None")
+        if [ "\$PVC_STATUS" = "Bound" ]; then
+          echo " PVC \$PVC_NAME already BOUND in \$ENV_NS → SKIPPING!"
+          kubectl get pv \$PV_NAME
+          kubectl get pvc \$PVC_NAME -n \$ENV_NS
+          exit 0
+        fi
+        
+        echo "PVC not bound, fixing storage..."
+        kubectl patch pv \$PV_NAME -p '{"spec":{"claimRef":null}}' || true
+        kubectl delete pvc \$PVC_NAME -n \$ENV_NS --force --grace-period=0 || true
+        sleep 10
         
         kubectl apply -f k8s/shared-storage-class.yaml || true
         kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
         sleep 3
         kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
         
+        # Wait loops...
         for i in {1..12}; do
-          PV_STATUS=\$(kubectl get pv shared-pv-\$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          PV_STATUS=\$(kubectl get pv \$PV_NAME -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
           echo "PV[\$i/12]: \$PV_STATUS"
-          [ "\$PV_STATUS" = "Available" ] && echo "PV READY!" && break || sleep 5
+          [ "\$PV_STATUS" = "Available" ] && break || sleep 5
         done
         
         for i in {1..30}; do
-          PHASE=\$(kubectl get pvc shared-pvc -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          PHASE=\$(kubectl get pvc \$PVC_NAME -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
           echo "PVC[\$i/30]: \$PHASE"
-          [ "\$PHASE" = "Bound" ] && echo "PVC BOUND!" && break || sleep 5
+          [ "\$PHASE" = "Bound" ] && break || sleep 5
         done
         
-        kubectl get pv shared-pv-\$ENV_NS
-        kubectl get pvc shared-pvc -n \$ENV_NS
+        kubectl get pv \$PV_NAME
+        kubectl get pvc \$PVC_NAME -n \$ENV_NS
+
       """
     }
   }
