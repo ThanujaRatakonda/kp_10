@@ -77,8 +77,7 @@ pipeline {
         """
       }
     }
-
-  stage('Apply Storage') {
+stage('Apply Storage') {
   steps {
     timeout(time: 8, unit: 'MINUTES') {
       sh """
@@ -87,15 +86,30 @@ pipeline {
         kubectl delete pvc shared-pvc -n \$ENV_NS --ignore-not-found=true || true
         sleep 5
         
+        # Apply fresh
         kubectl apply -f k8s/shared-storage-class.yaml || true
         kubectl apply -f k8s/shared-pv_\${ENV_NS}.yaml || true
         sleep 3
         kubectl apply -f k8s/shared-pvc_\${ENV_NS}.yaml -n \$ENV_NS || true
+        
+        for i in {1..12}; do
+          PV_STATUS=\$(kubectl get pv shared-pv-\$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          echo "PV[\$i/12]: \$PV_STATUS"
+          [ "\$PV_STATUS" = "Available" ] && echo "PV READY!" && break || sleep 5
+        done
+        
+        for i in {1..30}; do
+          PHASE=\$(kubectl get pvc shared-pvc -n \$ENV_NS -o jsonpath='{.status.phase}' 2>/dev/null || echo "Pending")
+          echo "PVC[\$i/30]: \$PHASE"
+          [ "\$PHASE" = "Bound" ] && echo " PVC BOUND!" && break || sleep 5
+        done
+        
+        kubectl get pv shared-pv-\$ENV_NS
+        kubectl get pvc shared-pvc -n \$ENV_NS
       """
     }
   }
 }
-
 
    stage('Docker Login') {
   when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
