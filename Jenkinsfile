@@ -111,25 +111,19 @@ pipeline {
     }
   }
 }
-    stage('Docker Login') {
-      when {
-        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
-      }
-      steps {
-        withCredentials([
-          usernamePassword(
-            credentialsId: 'harbor-creds',
-            usernameVariable: 'HARBOR_USER',
-            passwordVariable: 'HARBOR_PASS'
-          )
-        ]) {
-          sh """
-            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
-            echo "Docker login successful"
-          """
-        }
-      }
+   stage('Docker Login') {
+  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+  steps {
+    withCredentials([
+      usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')
+    ]) {
+      sh """
+        echo "\$HARBOR_PASS" | docker login ${REGISTRY} -u "\$HARBOR_USER" --password-stdin
+        echo " Docker login successful"
+      """
     }
+  }
+}
 
     stage('Build & Push Frontend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
