@@ -103,25 +103,27 @@ pipeline {
     }
   }
 }
-    stage('Docker Login') {
-      when {
-        expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] }
-      }
-      steps {
-        withCredentials([
-          usernamePassword(
-            credentialsId: 'harbor-creds',
-            usernameVariable: 'HARBOR_USER',
-            passwordVariable: 'HARBOR_PASS'
-          )
-        ]) {
-          sh """
-            echo "$HARBOR_PASS" | docker login ${REGISTRY} -u "$HARBOR_USER" --password-stdin
-            echo "Docker login successful"
-          """
-        }
-      }
+  stage('Docker Login') {
+  when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY', 'BACKEND_ONLY'] } }
+  steps {
+    withCredentials([
+      usernamePassword(credentialsId: 'harbor-creds', usernameVariable: 'HARBOR_USER', passwordVariable: 'HARBOR_PASS')
+    ]) {
+      sh """
+        set -e
+        # Wait for Harbor registry (max 60s)
+        for i in {1..12}; do
+          echo "Waiting Harbor (\$i/12)..."
+          if timeout 5 docker login ${REGISTRY} -u "\$HARBOR_USER" --password-stdin <<< "\$HARBOR_PASS" 2>/dev/null; then
+            echo " Docker login OK"
+            break
+          fi
+          sleep 5
+        done
+      """
     }
+  }
+}
 
     stage('Build & Push Frontend') {
       when { expression { params.ACTION in ['FULL_PIPELINE', 'FRONTEND_ONLY'] } }
